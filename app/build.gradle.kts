@@ -13,8 +13,8 @@ android {
         applicationId = "app.dtma.one"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.2.9"
+        versionCode = 15
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GIT_SHA", "\"dev\"")
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/Kirillka645/dtma-one\"")
@@ -100,7 +100,7 @@ dependencies {
     // X25519 keys for Cloudflare WARP (WireGuard) config generator
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     // In-app WireGuard tunnel (no external WireGuard app) for free WARP
-    implementation("com.wireguard.android:tunnel:1.0.20230706")
+    implementation("com.wireguard.android:tunnel:1.0.20250531")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 

@@ -15,7 +15,7 @@
 - Probe all DC timeouts on **one** network ⇒ try **multipath** (Wi‑Fi + LTE): DTMA binds Telegram DC sockets to the other underlying network (no SOCKS5).
 - **Smart path (0.2.6+):** on Telegram DC CONNECT, race ports 443/80/5222 + networks; prefer probe cache. Same IP only (no cross-DC rewrite — breaks MTProto). Helps 2/N when 443 is dead but 80/5222 live.
 - **DoH DNS (0.2.7+):** UDP/53 through local SOCKS is answered via Cloudflare/Google DoH. Helps **YouTube/sites** when ISP poisons plain DNS. Does **not** fix IP null-route or SNI DPI.
-- **In-app WARP (0.2.9+):** free Cloudflare WARP via embedded `wireguard-android` Go backend — **no external WireGuard app**. Local hev path is stopped when WARP starts. Egress is Cloudflare, not DTMA servers. Fallback: official 1.1.1.1 app if WARP API blocked.
+- **In-app WARP (0.3.0+):** free Cloudflare WARP via embedded `wireguard-android` Go backend — **no external WireGuard app**. IPv4-only + IP endpoint; success only after peer RX (handshake). Local hev stopped when WARP starts. If UDP/2408 blocked by ISP, handshake fails — use 1.1.1.1 app or MTProto.
 - Probe 0/N on **all** paths ⇒ no pure-local fix; need MTProto / user SOCKS5 / other network / VPS.
 - Workarounds without SOCKS5: smart path, multipath, official **MTProto** (`tg://proxy`), dual-SIM / other ISP.
 - With infrastructure: **Settings → upstream SOCKS5** or self-hosted MTProto.

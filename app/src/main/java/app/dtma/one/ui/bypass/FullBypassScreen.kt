@@ -37,9 +37,6 @@ import app.dtma.one.core.model.VpnUiState
 import app.dtma.one.vpn.VpnStateHolder
 import kotlinx.coroutines.launch
 
-/**
- * In-app free Cloudflare WARP (embedded WireGuard). No external WireGuard app required.
- */
 @Composable
 fun FullBypassScreen() {
     val context = LocalContext.current
@@ -47,25 +44,28 @@ fun FullBypassScreen() {
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val vpnStatus by VpnStateHolder.status.collectAsStateWithLifecycle()
-    val warpOn = WarpController.isRunning ||
-        (vpnStatus.state == VpnUiState.ACTIVE && vpnStatus.message.contains("WARP", ignoreCase = true))
+    val warpOn = WarpController.isRunning
 
     var pendingStart by remember { mutableStateOf(false) }
 
     fun doStartWarp() {
         busy = true
-        status = context.getString(R.string.warp_enabling)
+        status = "Запуск WARP + проверка handshake…"
         scope.launch {
             val result = WarpController.start(context)
             status = result.fold(
                 onSuccess = {
-                    "WARP внутри DTMA включён.\n" +
-                        "Проверьте YouTube и Telegram (лучше LTE).\n" +
-                        "Локальный hev-VPN при этом выключен."
+                    "WARP реально поднялся (Cloudflare ответил на handshake).\n" +
+                        "Проверьте YouTube и Telegram.\n" +
+                        "Если всё ещё нет — UDP 2408 режется, нужен MTProto/другая сеть.\n" +
+                        WarpController.statusLine()
                 },
                 onFailure = { e ->
-                    "Ошибка: ${e.message}\n" +
-                        "Попробуйте «Новый аккаунт WARP» или приложение 1.1.1.1."
+                    "НЕ включён (раньше могло писать «OK» без handshake):\n${e.message}\n\n" +
+                        "1) «Новый аккаунт WARP»\n" +
+                        "2) Только LTE\n" +
+                        "3) Запасной 1.1.1.1 app\n" +
+                        "4) MTProto для Telegram"
                 },
             )
             busy = false
@@ -81,7 +81,7 @@ fun FullBypassScreen() {
         } else {
             pendingStart = false
             busy = false
-            status = "Нужно разрешение VPN для WARP"
+            status = "Нужно разрешение VPN"
         }
     }
 
@@ -103,7 +103,7 @@ fun FullBypassScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Чтобы всё работало", style = MaterialTheme.typography.headlineSmall)
+        Text("WARP внутри DTMA", style = MaterialTheme.typography.headlineSmall)
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -111,9 +111,8 @@ fun FullBypassScreen() {
         ) {
             Text(
                 modifier = Modifier.padding(12.dp),
-                text = "Cloudflare WARP встроен в DTMA — отдельный WireGuard не нужен.\n" +
-                    "Трафик идёт через сеть Cloudflare (не сервер DTMA). " +
-                    "Локальный режим hev при старте WARP отключается.",
+                text = "0.3.0: не считаем WARP «включённым», пока Cloudflare не ответил (rx>0). " +
+                    "IPv4-only + IP endpoint. WireGuard-приложение не нужно.",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -149,30 +148,23 @@ fun FullBypassScreen() {
         OutlinedButton(
             onClick = {
                 WarpController.clearCachedConfig()
-                status = "Кэш WARP сброшен. Нажмите «Включить WARP» для новой регистрации."
+                status = "Кэш сброшен. Включите WARP снова (новая регистрация)."
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = !busy && !warpOn,
         ) {
-            Text("Новый аккаунт WARP (сброс conf)")
+            Text("Новый аккаунт WARP")
         }
 
-        Text(
-            "После включения: откройте YouTube и Telegram. " +
-                "Если WARP API недоступен в вашей сети — способ ниже.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        Text("Запасной путь", style = MaterialTheme.typography.titleMedium)
+        Text("Запасные пути", style = MaterialTheme.typography.titleMedium)
         OutlinedButton(
             onClick = {
                 WarpInstaller.openCloudflareWarpApp(context)
-                status = "Включите WARP в 1.1.1.1. DTMA VPN/WARP выключите, чтобы не конфликтовать."
+                status = "В 1.1.1.1 включите WARP. DTMA WARP выключите."
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Приложение Cloudflare 1.1.1.1 (если in-app не взлетел)")
+            Text("Приложение 1.1.1.1 WARP")
         }
         OutlinedButton(
             onClick = {
@@ -188,7 +180,15 @@ fun FullBypassScreen() {
         }
 
         if (status.isNotBlank()) {
-            Card {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (warpOn) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
+                ),
+            ) {
                 Text(
                     modifier = Modifier.padding(12.dp),
                     text = status,
@@ -198,7 +198,7 @@ fun FullBypassScreen() {
         }
 
         Text(
-            "Статус: ${vpnStatus.state} — ${vpnStatus.message.ifBlank { "—" }}",
+            "UI: ${vpnStatus.state} — ${vpnStatus.message.ifBlank { "—" }}\n${WarpController.statusLine()}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
