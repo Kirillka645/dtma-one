@@ -36,7 +36,8 @@ import kotlinx.coroutines.withContext
  */
 object WarpController {
     private const val TAG = "DtmaWarp"
-    private const val MAX_AUTO_REGEN = 3
+    /** Full start cycles (new Cloudflare account each fail). */
+    private const val MAX_AUTO_REGEN = 10
     private const val HEALTH_INTERVAL_MS = 2_500L
     /** If ON but no RX growth for this long while TX grows → unhealthy. */
     private const val STALL_MS = 20_000L
@@ -160,14 +161,25 @@ object WarpController {
     }
 
     private suspend fun bringUpOnce(app: Context, attempt: Int) {
+        // Pre-resolve Cloudflare API (operator DNS often broken).
+        try {
+            val ips = WarpBootstrapDns.resolveFresh("api.cloudflareclient.com")
+            Log.i(TAG, "DNS api.cloudflareclient.com → ${ips.map { it.hostAddress }}")
+            if (ips.isEmpty()) {
+                Log.w(TAG, "API host unresolved — generate() still tries bootstrap DNS in OkHttp")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "pre-DNS: ${e.message}")
+        }
+
         val generated = confCache ?: WarpConfigGenerator.generate().also {
             confCache = it
             WarpInstaller.writeConf(app, it.confText)
         }
-        Log.i(TAG, "attempt=$attempt endpoint=${generated.endpoint} addr=${generated.addressV4}")
-
-        val config = Config.parse(
-            ByteArrayInputStream(generated.confText.toByteArray(Charsets.UTF_8)),
+        Log.i(
+            TAG,
+            "attempt=$attempt primary=${generated.endpoint} " +
+                "candidates=${generated.endpointCandidates.size} addr=${generated.addressV4}",
         )
 
         ContextCompat.startForegroundService(
@@ -183,59 +195,80 @@ object WarpController {
         delay(200)
 
         val be = backend ?: GoBackend(app).also { backend = it }
-        val st = be.setState(WarpTunnel, Tunnel.State.UP, config)
-        Log.i(TAG, "setState → $st")
 
-        publish(
-            mode = WarpMode.STARTING,
-            message = "WARP: handshake Cloudflare…",
-            endpoint = generated.endpoint,
-            address = generated.addressV4,
-            attempts = attempt,
-        )
-
-        var rx = 0L
-        var tx = 0L
-        repeat(10) { i ->
-            delay(400)
-            try {
-                val s = be.getStatistics(WarpTunnel)
-                rx = s.totalRx()
-                tx = s.totalTx()
-                Log.i(TAG, "stats[$i] rx=$rx tx=$tx")
-                if (rx > 0) return@repeat
-            } catch (e: Exception) {
-                Log.w(TAG, "stats: ${e.message}")
-            }
-        }
-
-        if (rx == 0L) {
-            error(
-                "Нет handshake (rx=0). UDP 2408? endpoint=${generated.endpoint} tx=$tx",
+        // Try each endpoint (ports 2408/500/4500/… and engage anycast IPs) before failing.
+        val endpoints = generated.endpointCandidates.ifEmpty { listOf(generated.endpoint) }
+        var lastTx = 0L
+        var lastEp = generated.endpoint
+        for ((idx, ep) in endpoints.withIndex()) {
+            lastEp = ep
+            val variant = WarpConfigGenerator.withEndpoint(generated, ep)
+            confCache = variant
+            val config = Config.parse(
+                ByteArrayInputStream(variant.confText.toByteArray(Charsets.UTF_8)),
             )
+            try {
+                be.setState(WarpTunnel, Tunnel.State.DOWN, null)
+            } catch (_: Exception) {
+            }
+            delay(150)
+
+            publish(
+                mode = WarpMode.STARTING,
+                message = "WARP: handshake $ep (${idx + 1}/${endpoints.size})…",
+                endpoint = ep,
+                address = generated.addressV4,
+                attempts = attempt,
+            )
+            val st = be.setState(WarpTunnel, Tunnel.State.UP, config)
+            Log.i(TAG, "setState $ep → $st")
+
+            var rx = 0L
+            var tx = 0L
+            repeat(8) { i ->
+                delay(350)
+                try {
+                    val s = be.getStatistics(WarpTunnel)
+                    rx = s.totalRx()
+                    tx = s.totalTx()
+                    lastTx = tx
+                    if (rx > 0) {
+                        lastRx = rx
+                        lastRxChangeAt = System.currentTimeMillis()
+                        confCache = variant
+                        WarpInstaller.writeConf(app, variant.confText)
+                        publish(
+                            mode = WarpMode.ON,
+                            message = "WARP ВКЛ · $ep",
+                            endpoint = ep,
+                            address = generated.addressV4,
+                            rx = rx,
+                            tx = tx,
+                            attempts = attempt,
+                        )
+                        VpnStateHolder.set(
+                            VpnRuntimeStatus(
+                                state = VpnUiState.ACTIVE,
+                                message = "WARP ВКЛ · $ep · ↓${WarpLiveStatus.formatBytes(rx)}",
+                                ipv4 = true,
+                                ipv6 = false,
+                                limitedMode = false,
+                            ),
+                        )
+                        Log.i(TAG, "WARP ON ep=$ep rx=$rx")
+                        return
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "stats: ${e.message}")
+                }
+            }
+            Log.w(TAG, "no handshake on $ep tx=$tx")
         }
 
-        lastRx = rx
-        lastRxChangeAt = System.currentTimeMillis()
-        publish(
-            mode = WarpMode.ON,
-            message = "WARP ВКЛ · ${generated.endpoint}",
-            endpoint = generated.endpoint,
-            address = generated.addressV4,
-            rx = rx,
-            tx = tx,
-            attempts = attempt,
+        error(
+            "Нет handshake на ${endpoints.size} endpoint/портах (tx=$lastTx last=$lastEp). " +
+                "Оператор может резать UDP WARP.",
         )
-        VpnStateHolder.set(
-            VpnRuntimeStatus(
-                state = VpnUiState.ACTIVE,
-                message = "WARP ВКЛ · CF ${generated.endpoint} · ↓${WarpLiveStatus.formatBytes(rx)}",
-                ipv4 = true,
-                ipv6 = false,
-                limitedMode = false,
-            ),
-        )
-        Log.i(TAG, "WARP ON rx=$rx")
     }
 
     private fun startMonitor(app: Context) {

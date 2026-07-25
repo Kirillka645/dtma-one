@@ -55,9 +55,9 @@ fun FullBypassScreen() {
     fun doStart(forceNew: Boolean) {
         busy = true
         note = if (forceNew) {
-            "Новый аккаунт + авто-retry до 3 раз…"
+            "Новый аккаунт + до 10 попыток, DNS bootstrap, перебор портов…"
         } else {
-            "Запуск WARP (при сбое conf перегенерируется сам)…"
+            "Запуск WARP: bootstrap DNS (не DNS оператора), порты 2408/500/…, до 10 аккаунтов…"
         }
         scope.launch {
             val result = WarpController.start(context, forceNewAccount = forceNew)
@@ -224,10 +224,10 @@ fun FullBypassScreen() {
         }
 
         Text(
-            text = "• До 3 попыток с новой регистрацией Cloudflare, если conf не встаёт\n" +
-                "• Живой статус ВКЛ / ВЫКЛ / БОЛЬНОЙ\n" +
-                "• Счётчик ↓↑ трафика\n" +
-                "• IPv4-only + порт 2408",
+            text = "• DNS api.cloudflareclient.com через UDP к 1.1.1.1/8.8.8.8/… (не DNS оператора)\n" +
+                "• До 10 новых аккаунтов CF, если conf не встаёт\n" +
+                "• Handshake: порты 2408, 500, 4500, 1701, 443… + несколько IP engage\n" +
+                "• Статус ВКЛ/ВЫКЛ/БОЛЬНОЙ + ↓↑ + авто-reconnect",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
