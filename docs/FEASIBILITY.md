@@ -21,19 +21,21 @@
 
 ## 3. What is implemented where
 
-### System-wide VpnService mode
+### System-wide VpnService mode (0.2.x — hev-socks5-tunnel)
 
 | Capability | Status |
 |---|---|
 | Real TUN establish + foreground notification | Yes |
-| IPv4 TCP forwarding with `protect()` | Yes |
-| IPv4 UDP forwarding with `protect()` | Yes |
-| Managed DNS with PAER-ordered A/AAAA | Yes |
-| IPv6 TUN route (when device has IPv6) | Partial (crafted replies best-effort) |
-| Transparent IP remap only with DNS hostname binding | Yes (hostname→IP from managed DNS only) |
+| IPv4 TCP/UDP via hev (lwIP) + SOCKS5 egress | Yes |
+| Local SOCKS5 with `protect()` (same ISP) | Yes |
+| Optional **user** upstream SOCKS5 | Yes (Settings) |
+| System-wide PAER / endpoint race on TUN | **No** (PAER is built-in HTTPS tester only) |
+| Managed DNS with PAER-ordered A/AAAA + IP remap | **No** (legacy TunDataplane/SimpleDns; not wired) |
+| DNS servers on VPN interface | Underlying network DNS preferred; public fallback |
+| IPv6 TUN route | Best-effort when device supports |
 | Full TLS validation of third-party traffic | **No** (impossible without MITM) |
 | QUIC/HTTP/3 endpoint racing | **NOT_IMPLEMENTED** |
-| ICMP forwarding | No (MVP) |
+| ICMP forwarding | Via hev/lwIP as stack allows; not a separate PAER path |
 
 ### Built-in HTTPS client (DTMA One)
 

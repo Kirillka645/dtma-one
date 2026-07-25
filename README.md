@@ -1,69 +1,59 @@
 # DTMA One
 
-**Local Android VPN + PAER** (Passive Adaptive Endpoint Racing).  
-Open source (Apache-2.0). No remote VPN server, proxy, relay, ads, or telemetry.
+**Local Android VPN** (hev-socks5-tunnel / lwIP tun2socks) + **PAER** tools for the **built-in HTTPS test**.  
+Open source (Apache-2.0). No remote VPN/proxy owned by this project.
 
-> **Not a bypass guarantee.** PAER may improve reachability only when at least one legitimate endpoint of the target is reachable.
+> **Not a bypass guarantee.** If every legitimate IP of a service is unreachable from your ISP, a local VPN that exits via the same ISP cannot help.
 
-## Features (MVP 0.1.0)
+## What system VPN does (0.2.x)
 
-- One-button **Enable / Disable** local `VpnService`
-- Real TUN dataplane: IPv4 TCP/UDP + managed DNS (`protect()` on sockets)
-- **PAER**: limited endpoint race + **RVEC** + **Passive Hypothesis Engine**
-- Built-in **strict HTTPS test** (platform TLS; invalid certs rejected)
-- Material 3, system light/dark, **Russian + English**
-- Encrypted RVEC (AES-GCM + Keystore-backed key material)
+```
+Apps → VpnService TUN → hev-socks5-tunnel → SOCKS5 egress → Internet
+```
+
+- **Default egress:** in-process SOCKS5 with `VpnService.protect()` (same ISP).
+- **Optional egress:** **your** upstream SOCKS5 (Settings) when DCs/sites are blocked on ISP path.
+- Real TCP/UDP stack: **hev** (not the legacy pure-Kotlin `TunDataplane`).
+
+## What PAER does
+
+- **Built-in connection test only:** limited endpoint race, RVEC, Passive Hypothesis Engine, strict TLS.
+- **Not** applied as transparent remap for all apps in system mode (by design after 0.2; avoids anti-CER “force first IP” bugs).
+
+## Features
+
+- One-button Enable / Disable
+- hev tun2socks + local or user SOCKS5
+- Telegram DC probe (diagnostics)
+- Material 3, RU/EN
+- Encrypted RVEC for the HTTPS-test path
 
 ## Build
 
 ```bash
-# JDK 17+, Android SDK
-./gradlew test lintDebug assembleDebug assembleRelease
+# JDK 17+, Android SDK, NDK 27.x (for hev-socks5-tunnel)
+./gradlew test assembleDebug
 ```
 
-Debug APK:
+Package (debug): `app.dtma.one.debug`
 
-`app/build/outputs/apk/debug/app-debug.apk`
+## Telegram / blocked DCs
 
-## Install (test)
-
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-Package id (debug): `app.dtma.one.debug`
+1. Run **Проверка → Проверить DC Telegram**.
+2. If **0/N reachable** → local mode cannot open Telegram; set **your SOCKS5** in Settings or use MTProto inside Telegram.
+3. See [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
 
 ## Docs
 
 | Doc | Purpose |
 |---|---|
-| [docs/FEASIBILITY.md](docs/FEASIBILITY.md) | What is/isn't observable without TLS intercept |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules and pipeline |
-| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Threats and mitigations |
-| [docs/PRIVACY.md](docs/PRIVACY.md) | Data handling |
+| [docs/FEASIBILITY.md](docs/FEASIBILITY.md) | Observability without TLS intercept |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules |
+| [docs/AUDIT_CLAUDE_RESPONSE.md](docs/AUDIT_CLAUDE_RESPONSE.md) | Fact-check of TunDataplane audit |
 | [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | Honest limits |
-| [docs/SIGNING.md](docs/SIGNING.md) | Debug vs production signing |
-| [docs/adr/](docs/adr/) | Architecture decisions |
-
-## Security posture
-
-- No user CA, no TLS decrypt, no trust-all TrustManager
-- No port scanning / invented endpoints
-- Non-idempotent application requests sent **once**
-- RVEC excludes URL path/query/content; backup disabled
+| [docs/adr/0001-tun-dataplane.md](docs/adr/0001-tun-dataplane.md) | Why hev |
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
-
-## CI note
-
-GitHub Actions workflow sources live in [docs/ci/](docs/ci/) because the initial publish token lacked the `workflow` scope.
-To enable Actions, copy them to `.github/workflows/` after:
-
-```bash
-gh auth refresh -s workflow,repo
-cp docs/ci/*.yml .github/workflows/
-git add .github/workflows && git commit -m "ci: enable GitHub Actions" && git push
-```
-
+Apache License 2.0 — see [LICENSE](LICENSE).  
+hev-socks5-tunnel: MIT (vendored under `app/src/main/jni/`).

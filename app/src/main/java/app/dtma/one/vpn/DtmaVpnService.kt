@@ -3,6 +3,8 @@ package app.dtma.one.vpn
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -19,18 +21,19 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
 /**
- * Local VpnService: hev-socks5-tunnel (lwIP) + egress SOCKS5.
+ * Local VpnService: hev-socks5-tunnel (lwIP) + SOCKS5 egress.
  *
- * Egress modes:
- * 1) Default — local SOCKS5 with [protect] (same ISP, no remote infra).
- * 2) Optional user-provided upstream SOCKS5 (YOUR proxy — not DTMA servers).
- *    Use this when probe shows Telegram DCs blocked on the ISP path.
+ * Default: local protect SOCKS5 (same ISP).
+ * Optional: user upstream SOCKS5 when Telegram/other DCs are ISP-blocked.
+ *
+ * Does NOT use legacy TunDataplane / selectDestination remap.
  */
 class DtmaVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var socks5: LocalSocks5Server? = null
     private var hevRunning = false
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -62,35 +65,44 @@ class DtmaVpnService : VpnService() {
                 DtmaApp.instance.settingsRepository.settings.first()
             }
             val networkContext = NetworkContextFactory.current(this)
+            val underlying = UnderlyingNetwork.current(this)
 
             val socksHost: String
             val socksPort: Int
             val modeLabel: String
 
             if (settings.hasUpstreamSocks()) {
-                // User-provided remote SOCKS5 (e.g. VPS that can reach Telegram DCs).
                 socks5?.stop()
                 socks5 = null
                 socksHost = settings.upstreamSocksHost.trim()
                 socksPort = settings.upstreamSocksPort
                 modeLabel = "Upstream SOCKS5 $socksHost:$socksPort (ваш прокси)"
-                Log.i(TAG, "Using user upstream SOCKS5 $socksHost:$socksPort")
+                Log.i(TAG, "User upstream SOCKS5 $socksHost:$socksPort")
             } else {
                 val socks = LocalSocks5Server(this, bindPort = 18080)
                 socks.start()
                 socks5 = socks
                 socksHost = "127.0.0.1"
                 socksPort = socks.listenPort
-                modeLabel = "Local SOCKS5 (тот же ISP; blocked DC не откроет)"
+                modeLabel = "Local SOCKS5 · same ISP (blocked Telegram DC ≠ openable)"
             }
 
             val builder = Builder()
                 .setSession("DTMA One")
                 .setMtu(1400)
                 .addAddress("10.0.0.2", 30)
-                .addDnsServer("1.1.1.1")
-                .addDnsServer("8.8.8.8")
                 .addRoute("0.0.0.0", 0)
+
+            // Prefer underlying network DNS; fall back to public only if empty.
+            val dnsList = underlying.dnsServers.mapNotNull { it.hostAddress }.distinct()
+            if (dnsList.isNotEmpty()) {
+                dnsList.take(3).forEach { builder.addDnsServer(it) }
+                Log.i(TAG, "DNS from underlying: $dnsList")
+            } else {
+                builder.addDnsServer("1.1.1.1")
+                builder.addDnsServer("8.8.8.8")
+                Log.w(TAG, "No underlying DNS; using 1.1.1.1/8.8.8.8 fallback")
+            }
 
             var ipv6 = false
             try {
@@ -101,15 +113,16 @@ class DtmaVpnService : VpnService() {
                 Log.w(TAG, "IPv6 TUN not enabled: ${e.message}")
             }
 
+            // Inherit metered status (do not force unmetered — avoids surprise media auto-download).
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                builder.setMetered(false)
+                builder.setMetered(underlying.metered)
             }
+
             try {
                 builder.addDisallowedApplication(packageName)
             } catch (e: Exception) {
                 Log.w(TAG, "disallow self: ${e.message}")
             }
-            // If user SOCKS is a local IP on LAN, also fine (disallowed app reaches it).
 
             val pfd = builder.establish()
             if (pfd == null) {
@@ -127,8 +140,18 @@ class DtmaVpnService : VpnService() {
             }
             tun = pfd
 
+            // Bind VPN to physical network so protected/disallowed traffic tracks Wi‑Fi↔LTE.
+            if (underlying.network != null) {
+                try {
+                    setUnderlyingNetworks(arrayOf(underlying.network))
+                } catch (e: Exception) {
+                    Log.w(TAG, "setUnderlyingNetworks: ${e.message}")
+                }
+            }
+            registerNetworkWatcher()
+
             val configFile = writeHevConfig(socksHost, socksPort, ipv6)
-            Log.i(TAG, "hev start fd=${pfd.fd} socks=$socksHost:$socksPort ipv6=$ipv6")
+            Log.i(TAG, "hev start fd=${pfd.fd} socks=$socksHost:$socksPort ipv6=$ipv6 metered=${underlying.metered}")
             HevTunnel.TProxyStartService(configFile.absolutePath, pfd.fd)
             hevRunning = true
 
@@ -143,7 +166,7 @@ class DtmaVpnService : VpnService() {
                     limitedMode = !settings.hasUpstreamSocks(),
                 ),
             )
-            Log.i(TAG, "VPN started")
+            Log.i(TAG, "VPN started (hev, not TunDataplane)")
         } catch (e: Exception) {
             Log.e(TAG, "start failed", e)
             VpnStateHolder.update {
@@ -151,6 +174,53 @@ class DtmaVpnService : VpnService() {
             }
             stopVpn()
         }
+    }
+
+    private fun registerNetworkWatcher() {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        unregisterNetworkWatcher()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                try {
+                    setUnderlyingNetworks(arrayOf(network))
+                    Log.i(TAG, "underlying network available: $network")
+                } catch (e: Exception) {
+                    Log.w(TAG, "onAvailable: ${e.message}")
+                }
+            }
+
+            override fun onLost(network: Network) {
+                Log.w(TAG, "underlying network lost: $network")
+                val next = UnderlyingNetwork.current(this@DtmaVpnService).network
+                try {
+                    setUnderlyingNetworks(if (next != null) arrayOf(next) else null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "onLost setUnderlying: ${e.message}")
+                }
+                VpnStateHolder.update {
+                    it.copy(
+                        state = if (next != null) VpnUiState.ACTIVE else VpnUiState.UNSTABLE,
+                        message = if (next != null) {
+                            it.message
+                        } else {
+                            "Underlying network lost — waiting…"
+                        },
+                    )
+                }
+            }
+        }
+        networkCallback = cb
+        UnderlyingNetwork.requestNonVpn(cm, cb)
+    }
+
+    private fun unregisterNetworkWatcher() {
+        val cb = networkCallback ?: return
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            cm.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {
+        }
+        networkCallback = null
     }
 
     private fun writeHevConfig(socksHost: String, socksPort: Int, ipv6: Boolean): File {
@@ -177,6 +247,7 @@ class DtmaVpnService : VpnService() {
     }
 
     private fun stopVpn() {
+        unregisterNetworkWatcher()
         try {
             if (hevRunning && HevTunnel.available) {
                 HevTunnel.TProxyStopService()

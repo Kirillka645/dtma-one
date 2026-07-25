@@ -1,5 +1,10 @@
 package app.dtma.one.core.network.tun
 
+
+/**
+ * LEGACY / NOT USED by DtmaVpnService (0.2.x uses hev + LocalSocks5).
+ * Do not re-enable without fixing docs/AUDIT_CLAUDE_RESPONSE.md checklist.
+ */
 import app.dtma.one.core.model.CandidatePlanner
 import app.dtma.one.core.model.CandidateSource
 import app.dtma.one.core.model.EndpointCandidate
