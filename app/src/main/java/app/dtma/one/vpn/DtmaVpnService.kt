@@ -65,13 +65,24 @@ class DtmaVpnService : VpnService() {
 
             val builder = Builder()
                 .setSession("DTMA One")
-                .setMtu(1500)
+                // Slightly lower MTU reduces blackhole issues on mobile.
+                .setMtu(1400)
                 .addAddress("10.0.0.2", 30)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .addRoute("0.0.0.0", 0)
 
-            // Do not claim IPv6 until dual-stack is validated end-to-end.
+            // Dual-stack: Telegram often prefers IPv6; without ::/0 those packets
+            // bypass VPN and can hang on a broken v6 path while "internet" still works.
+            var ipv6 = false
+            try {
+                builder.addAddress("fd00:646d:7461::2", 64)
+                builder.addRoute("::", 0)
+                ipv6 = true
+            } catch (e: Exception) {
+                Log.w(TAG, "IPv6 TUN not enabled: ${e.message}")
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
             }
@@ -98,22 +109,24 @@ class DtmaVpnService : VpnService() {
             }
             tun = pfd
 
-            val configFile = writeHevConfig(socksPort)
+            val configFile = writeHevConfig(socksPort, ipv6)
             val fd = pfd.fd
-            Log.i(TAG, "Starting hev tun2socks fd=$fd socks=127.0.0.1:$socksPort cfg=${configFile.absolutePath}")
+            Log.i(TAG, "Starting hev tun2socks fd=$fd socks=127.0.0.1:$socksPort ipv6=$ipv6")
 
-            // Blocks in native thread inside hev; returns immediately from JNI after spawn.
+            // JNI returns after spawning hev worker thread.
             HevTunnel.TProxyStartService(configFile.absolutePath, fd)
             hevRunning = true
 
             VpnStateHolder.set(
                 VpnRuntimeStatus(
                     state = VpnUiState.ACTIVE,
-                    message = "Local tun2socks (hev+SOCKS5). No remote server. IPv4.",
+                    message = "Local tun2socks (hev+SOCKS5). Same ISP path — " +
+                        "blocked Telegram DCs stay blocked. IPv4" +
+                        if (ipv6) "+IPv6." else ".",
                     flowCount = 0,
                     networkContext = networkContext,
                     ipv4 = true,
-                    ipv6 = false,
+                    ipv6 = ipv6,
                     limitedMode = false,
                 ),
             )
@@ -127,25 +140,26 @@ class DtmaVpnService : VpnService() {
         }
     }
 
-    private fun writeHevConfig(socksPort: Int): File {
+    private fun writeHevConfig(socksPort: Int, ipv6: Boolean): File {
         val f = File(filesDir, "hev-config.yml")
-        // hev owns the TUN stack; socks5 is our protect()'d egress.
-        val yaml = """
-            |tunnel:
-            |  mtu: 1500
-            |  multi-queue: false
-            |  ipv4: 10.0.0.2
-            |socks5:
-            |  port: $socksPort
-            |  address: 127.0.0.1
-            |  udp: 'udp'
-            |misc:
-            |  log-level: warn
-            |  connect-timeout: 10000
-            |  tcp-read-write-timeout: 300000
-            |  udp-read-write-timeout: 60000
-            |
-        """.trimMargin()
+        // Long TCP timeouts: Telegram keeps idle push connections open.
+        val yaml = buildString {
+            appendLine("tunnel:")
+            appendLine("  mtu: 1400")
+            appendLine("  multi-queue: false")
+            appendLine("  ipv4: 10.0.0.2")
+            if (ipv6) appendLine("  ipv6: 'fd00:646d:7461::2'")
+            appendLine("socks5:")
+            appendLine("  port: $socksPort")
+            appendLine("  address: 127.0.0.1")
+            appendLine("  udp: 'udp'")
+            appendLine("misc:")
+            appendLine("  log-level: warn")
+            appendLine("  connect-timeout: 15000")
+            appendLine("  tcp-read-write-timeout: 600000")
+            appendLine("  udp-read-write-timeout: 120000")
+            appendLine("  max-session-count: 0")
+        }
         f.writeText(yaml)
         return f
     }

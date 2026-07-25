@@ -11,10 +11,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,7 +31,7 @@ import app.dtma.one.core.network.NetworkContextFactory
 import app.dtma.one.core.network.dns.DnsResolveResult
 import app.dtma.one.core.network.dns.SystemDnsResolver
 import app.dtma.one.core.network.https.StrictHttpsTester
-import app.dtma.one.core.storage.SettingsRepository
+import app.dtma.one.vpn.TelegramDcProbe
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -137,6 +137,36 @@ fun ConnectionTestScreen() {
         ) {
             Text(if (running) "Running…" else "Run PAER HTTPS test")
         }
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    running = true
+                    events = emptyList()
+                    summary = "Probing Telegram DCs…"
+                    try {
+                        val results = TelegramDcProbe.probeAll()
+                        summary = TelegramDcProbe.summarize(results)
+                        events = results.map {
+                            "${if (it.ok) "OK" else "FAIL"} ${it.target.label} ${it.target.host} ${it.error ?: "${it.ms}ms"}"
+                        }
+                    } catch (e: Exception) {
+                        summary = "Probe error: ${e.message}"
+                    } finally {
+                        running = false
+                    }
+                }
+            },
+            enabled = !running,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Проверить DC Telegram (диагностика)")
+        }
+        Text(
+            "Локальный VPN выходит через того же провайдера. " +
+                "Если все DC Telegram недоступны — DTMA One их не «откроет».",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (running) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }

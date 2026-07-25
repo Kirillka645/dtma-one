@@ -18,12 +18,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
- * Minimal local SOCKS5 (no auth) for hev-socks5-tunnel.
- * All outbound sockets are protected via [VpnService.protect] to avoid TUN loops.
+ * Local SOCKS5 (no-auth) for hev-socks5-tunnel.
+ * Outbound sockets use [VpnService.protect].
  *
- * Supports:
- * - TCP CONNECT
- * - UDP ASSOCIATE (for DNS / QUIC / Telegram UDP)
+ * Important for Telegram:
+ * - long-lived TCP must use soTimeout=0 after handshake (no 60s idle kill)
+ * - UDP ASSOCIATE for MTProto/calls/DNS
  */
 class LocalSocks5Server(
     private val vpn: VpnService,
@@ -37,10 +37,17 @@ class LocalSocks5Server(
     private val running = AtomicBoolean(false)
     private val pool = Executors.newCachedThreadPool()
     private var server: ServerSocket? = null
-    private val udpRelays = ConcurrentHashMap<Int, UdpRelay>()
 
     @Volatile
     var listenPort: Int = bindPort
+        private set
+
+    @Volatile
+    var tcpConnectOk: Long = 0
+        private set
+
+    @Volatile
+    var tcpConnectFail: Long = 0
         private set
 
     fun start() {
@@ -51,10 +58,12 @@ class LocalSocks5Server(
         listenPort = ss.localPort
         server = ss
         thread(name = "dtma-socks5-accept", isDaemon = true) {
-            Log.i(TAG, "SOCKS5 listening on $bindHost:$listenPort")
+            Log.i(TAG, "SOCKS5 on $bindHost:$listenPort")
             while (running.get()) {
                 try {
                     val client = ss.accept()
+                    // Only for greeting phase; cleared after CONNECT setup.
+                    client.soTimeout = 30_000
                     pool.execute { handleClient(client) }
                 } catch (_: Exception) {
                     if (running.get()) break
@@ -70,35 +79,32 @@ class LocalSocks5Server(
         } catch (_: Exception) {
         }
         server = null
-        udpRelays.values.forEach { it.close() }
-        udpRelays.clear()
         pool.shutdownNow()
     }
 
     private fun handleClient(client: Socket) {
         try {
-            client.soTimeout = 60_000
             val input = client.getInputStream()
             val output = client.getOutputStream()
 
-            // greeting
             if (input.read() != 0x05) return
             val nMethods = input.read()
             if (nMethods <= 0) return
             val methods = ByteArray(nMethods)
             readFully(input, methods)
-            // no-auth only
             output.write(byteArrayOf(0x05, 0x00))
             output.flush()
 
-            // request
             val ver = input.read()
             val cmd = input.read()
             input.read() // rsv
             val atyp = input.read()
             if (ver != 0x05) return
 
-            val dest = readAddress(input, atyp) ?: return
+            val dest = readAddress(input, atyp) ?: run {
+                reply(output, 0x08, InetAddress.getByName("0.0.0.0"), 0)
+                return
+            }
             val portHi = input.read()
             val portLo = input.read()
             if (portHi < 0 || portLo < 0) return
@@ -106,7 +112,7 @@ class LocalSocks5Server(
 
             when (cmd) {
                 0x01 -> doConnect(client, input, output, dest, port)
-                0x03 -> doUdpAssociate(client, input, output)
+                0x03 -> doUdpAssociate(client, output)
                 else -> {
                     reply(output, 0x07, InetAddress.getByName("0.0.0.0"), 0)
                     client.close()
@@ -131,26 +137,42 @@ class LocalSocks5Server(
         val remote = Socket()
         try {
             if (!vpn.protect(remote)) {
-                Log.w(TAG, "protect failed for TCP $dest:$port")
+                Log.w(TAG, "protect failed TCP ${dest.hostAddress}:$port")
                 reply(output, 0x01, InetAddress.getByName("0.0.0.0"), 0)
+                tcpConnectFail++
                 client.close()
                 return
             }
             remote.tcpNoDelay = true
+            remote.keepAlive = true
+            // Telegram push sessions stay idle for a long time — never time out the pipe.
+            remote.soTimeout = 0
+            client.soTimeout = 0
             remote.connect(InetSocketAddress(dest, port), 15_000)
+
             val local = remote.localSocketAddress as? InetSocketAddress
             val bindAddr = local?.address ?: InetAddress.getByName("0.0.0.0")
             val bindPort = local?.port ?: 0
             reply(output, 0x00, bindAddr, bindPort)
+            tcpConnectOk++
+            Log.d(TAG, "CONNECT ok ${dest.hostAddress}:$port")
 
-            // bidirectional pipe
-            val t1 = thread(isDaemon = true, name = "s5-up") {
+            val up = thread(isDaemon = true, name = "s5-c2s") {
                 pipe(input, remote.getOutputStream())
+                try {
+                    remote.shutdownOutput()
+                } catch (_: Exception) {
+                }
             }
             pipe(remote.getInputStream(), output)
-            t1.join(100)
+            try {
+                client.shutdownOutput()
+            } catch (_: Exception) {
+            }
+            up.join(500)
         } catch (e: Exception) {
-            Log.d(TAG, "CONNECT $dest:$port failed: ${e.message}")
+            tcpConnectFail++
+            Log.d(TAG, "CONNECT fail ${dest.hostAddress}:$port — ${e.message}")
             try {
                 reply(output, 0x05, InetAddress.getByName("0.0.0.0"), 0)
             } catch (_: Exception) {
@@ -167,94 +189,55 @@ class LocalSocks5Server(
         }
     }
 
-    private fun doUdpAssociate(client: Socket, input: InputStream, output: OutputStream) {
-        val udp = DatagramSocket()
-        if (!vpn.protect(udp)) {
-            Log.w(TAG, "protect failed for UDP associate")
+    private fun doUdpAssociate(client: Socket, output: OutputStream) {
+        val relaySock = DatagramSocket()
+        if (!vpn.protect(relaySock)) {
+            Log.w(TAG, "protect failed UDP ASSOCIATE")
             reply(output, 0x01, InetAddress.getByName("0.0.0.0"), 0)
-            udp.close()
+            relaySock.close()
             client.close()
             return
         }
-        udp.soTimeout = 300_000
-        val port = udp.localPort
-        val relay = UdpRelay(udp)
-        udpRelays[port] = relay
+        relaySock.soTimeout = 0
+        val port = relaySock.localPort
         reply(output, 0x00, InetAddress.getByName("127.0.0.1"), port)
-        Log.d(TAG, "UDP ASSOCIATE on $port")
+        Log.d(TAG, "UDP ASSOCIATE port=$port")
 
-        // Keep TCP control connection open; when it closes, stop relay.
-        pool.execute {
-            try {
-                relay.loop()
-            } finally {
-                udpRelays.remove(port)
-                relay.close()
-            }
-        }
-        try {
-            // Wait until client closes control connection
-            val buf = ByteArray(1)
-            while (running.get()) {
-                val n = try {
-                    client.getInputStream().read(buf)
-                } catch (_: SocketTimeoutException) {
-                    continue
-                }
-                if (n < 0) break
-            }
-        } finally {
-            try {
-                client.close()
-            } catch (_: Exception) {
-            }
-            relay.close()
-            udpRelays.remove(port)
-        }
-    }
+        // Long-lived control connection for Telegram / DNS / QUIC
+        client.soTimeout = 0
+        val closed = AtomicBoolean(false)
+        val clientEp = arrayOfNulls<InetSocketAddress>(1)
 
-    private inner class UdpRelay(private val sock: DatagramSocket) {
-        private val closed = AtomicBoolean(false)
-        // client endpoint (first packet source)
-        @Volatile
-        private var clientEp: InetSocketAddress? = null
-        // map remote key -> last used
-        private val remotes = ConcurrentHashMap<String, InetSocketAddress>()
-
-        fun loop() {
+        val relayThread = thread(isDaemon = true, name = "s5-udp-$port") {
             val buf = ByteArray(65535)
             while (!closed.get() && running.get()) {
                 try {
-                    val packet = DatagramPacket(buf, buf.size)
-                    sock.receive(packet)
-                    val from = InetSocketAddress(packet.address, packet.port)
-                    val data = packet.data
-                    val off = packet.offset
-                    val len = packet.length
-
-                    val client = clientEp
-                    if (client == null || (from.address == client.address && from.port == client.port) ||
-                        (clientEp == null)
-                    ) {
-                        // from SOCKS5 client: parse header and forward
-                        if (clientEp == null) clientEp = from
+                    val pkt = DatagramPacket(buf, buf.size)
+                    relaySock.receive(pkt)
+                    val from = InetSocketAddress(pkt.address, pkt.port)
+                    val data = pkt.data
+                    val off = pkt.offset
+                    val len = pkt.length
+                    val ep = clientEp[0]
+                    if (ep == null || (from.address == ep.address && from.port == ep.port)) {
+                        if (clientEp[0] == null) clientEp[0] = from
                         if (len < 4) continue
-                        // RSV RSV FRAG ATYP ...
                         if (data[off].toInt() != 0 || data[off + 1].toInt() != 0) continue
-                        if (data[off + 2].toInt() and 0xFF != 0) continue // no frag
+                        if ((data[off + 2].toInt() and 0xFF) != 0) continue
                         val atyp = data[off + 3].toInt() and 0xFF
                         var p = off + 4
-                        val destAddr: InetAddress
-                        when (atyp) {
+                        val destAddr: InetAddress = when (atyp) {
                             0x01 -> {
                                 if (p + 4 > off + len) continue
-                                destAddr = InetAddress.getByAddress(data.copyOfRange(p, p + 4))
+                                val a = InetAddress.getByAddress(data.copyOfRange(p, p + 4))
                                 p += 4
+                                a
                             }
                             0x04 -> {
                                 if (p + 16 > off + len) continue
-                                destAddr = InetAddress.getByAddress(data.copyOfRange(p, p + 16))
+                                val a = InetAddress.getByAddress(data.copyOfRange(p, p + 16))
                                 p += 16
+                                a
                             }
                             0x03 -> {
                                 if (p >= off + len) continue
@@ -263,7 +246,7 @@ class LocalSocks5Server(
                                 if (p + dlen > off + len) continue
                                 val host = String(data, p, dlen, Charsets.US_ASCII)
                                 p += dlen
-                                destAddr = InetAddress.getByName(host)
+                                InetAddress.getByName(host)
                             }
                             else -> continue
                         }
@@ -271,31 +254,42 @@ class LocalSocks5Server(
                         val dport = ((data[p].toInt() and 0xFF) shl 8) or (data[p + 1].toInt() and 0xFF)
                         p += 2
                         val payload = data.copyOfRange(p, off + len)
-                        val remote = InetSocketAddress(destAddr, dport)
-                        remotes["${destAddr.hostAddress}:$dport"] = remote
-                        sock.send(DatagramPacket(payload, payload.size, remote))
+                        relaySock.send(DatagramPacket(payload, payload.size, destAddr, dport))
                     } else {
-                        // from remote internet: wrap and send to client
-                        val c = clientEp ?: continue
+                        val c = clientEp[0] ?: continue
                         val header = buildUdpHeader(from.address, from.port)
-                        val out = header + data.copyOfRange(off, off + len)
-                        sock.send(DatagramPacket(out, out.size, c))
+                        val outBytes = header + data.copyOfRange(off, off + len)
+                        relaySock.send(DatagramPacket(outBytes, outBytes.size, c))
                     }
                 } catch (_: SocketTimeoutException) {
-                    // keep
                 } catch (e: Exception) {
-                    if (!closed.get()) Log.d(TAG, "udp relay: ${e.message}")
+                    if (!closed.get()) Log.d(TAG, "udp relay end: ${e.message}")
                     break
                 }
             }
-        }
-
-        fun close() {
-            if (!closed.compareAndSet(false, true)) return
             try {
-                sock.close()
+                relaySock.close()
             } catch (_: Exception) {
             }
+        }
+
+        try {
+            val sink = ByteArray(256)
+            while (running.get()) {
+                val n = client.getInputStream().read(sink)
+                if (n < 0) break
+            }
+        } finally {
+            closed.set(true)
+            try {
+                relaySock.close()
+            } catch (_: Exception) {
+            }
+            try {
+                client.close()
+            } catch (_: Exception) {
+            }
+            relayThread.join(300)
         }
     }
 
@@ -320,9 +314,12 @@ class LocalSocks5Server(
         if (raw.size == 4) {
             atyp = 0x01
             addrBytes = raw
-        } else {
+        } else if (raw.size == 16) {
             atyp = 0x04
-            addrBytes = if (raw.size == 16) raw else ByteArray(16)
+            addrBytes = raw
+        } else {
+            atyp = 0x01
+            addrBytes = byteArrayOf(0, 0, 0, 0)
         }
         val resp = ByteArray(4 + addrBytes.size + 2)
         resp[0] = 0x05
@@ -374,11 +371,12 @@ class LocalSocks5Server(
     }
 
     private fun pipe(input: InputStream, output: OutputStream) {
-        val buf = ByteArray(32 * 1024)
+        val buf = ByteArray(64 * 1024)
         try {
             while (true) {
                 val n = input.read(buf)
                 if (n < 0) break
+                if (n == 0) continue
                 output.write(buf, 0, n)
                 output.flush()
             }
