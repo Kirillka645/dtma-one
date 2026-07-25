@@ -13,6 +13,33 @@ object WarpInstaller {
     const val WIREGUARD_PKG = "com.wireguard.android"
     const val CLOUDFLARE_WARP_PKG = "com.cloudflare.onedotonedotonedotone"
 
+    /** Durable conf (survives app restart — no re-reg if API blocked). */
+    fun persistentConfFile(context: Context): File {
+        val dir = File(context.filesDir, "warp")
+        dir.mkdirs()
+        return File(dir, "dtma-warp.conf")
+    }
+
+    fun loadPersistentConf(context: Context): String? {
+        val f = persistentConfFile(context)
+        if (!f.isFile || f.length() < 40) return null
+        return runCatching { f.readText() }.getOrNull()?.takeIf {
+            it.contains("[Interface]", ignoreCase = true) && it.contains("PrivateKey")
+        }
+    }
+
+    fun savePersistentConf(context: Context, confText: String) {
+        runCatching {
+            persistentConfFile(context).writeText(confText)
+            writeConf(context, confText)
+        }.onFailure { Log.w(TAG, "save conf: ${it.message}") }
+    }
+
+    fun clearPersistentConf(context: Context) {
+        runCatching { persistentConfFile(context).delete() }
+        runCatching { File(context.cacheDir, "warp/dtma-warp.conf").delete() }
+    }
+
     fun writeConf(context: Context, confText: String): File {
         val dir = File(context.cacheDir, "warp")
         dir.mkdirs()

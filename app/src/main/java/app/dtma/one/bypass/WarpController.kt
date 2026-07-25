@@ -67,8 +67,9 @@ object WarpController {
     val isRunning: Boolean get() = _status.value.mode == WarpMode.ON ||
         _status.value.mode == WarpMode.UNHEALTHY
 
-    fun clearCachedConfig() {
+    fun clearCachedConfig(context: Context? = null) {
         confCache = null
+        context?.applicationContext?.let { WarpInstaller.clearPersistentConf(it) }
         publish(
             mode = _status.value.mode,
             message = "Кэш conf сброшен",
@@ -77,14 +78,49 @@ object WarpController {
     }
 
     /**
-     * Start WARP. On failure: drop conf, register a new Cloudflare account, retry
-     * up to [MAX_AUTO_REGEN] times automatically.
+     * Import WireGuard conf from text (clipboard) — skips Cloudflare API registration.
+     * Useful when api.cloudflareclient.com is blocked by the ISP.
+     */
+    suspend fun startFromConf(context: Context, confText: String): Result<Unit> =
+        mutex.withLock {
+            withContext(Dispatchers.IO) {
+                val app = context.applicationContext
+                stopInternal(keepService = false)
+                stopLocalHev(app)
+                delay(150)
+                try {
+                    val parsed = WarpConfigGenerator.fromConfText(confText)
+                    confCache = parsed
+                    WarpInstaller.savePersistentConf(app, parsed.confText)
+                    bringUpOnce(app, attempt = 1, allowRegister = false)
+                    startMonitor(app)
+                    Result.success(Unit)
+                } catch (e: Exception) {
+                    val errMsg = shortError(e)
+                    publish(
+                        mode = WarpMode.ERROR,
+                        message = "WARP conf: $errMsg",
+                        error = errMsg,
+                    )
+                    Result.failure(e)
+                }
+            }
+        }
+
+    /**
+     * Start WARP. Uses saved conf first; on failure re-registers (if API reachable)
+     * up to [MAX_AUTO_REGEN] times.
      */
     suspend fun start(context: Context, forceNewAccount: Boolean = false): Result<Unit> =
         mutex.withLock {
             withContext(Dispatchers.IO) {
                 val app = context.applicationContext
-                if (forceNewAccount) confCache = null
+                if (forceNewAccount) {
+                    confCache = null
+                    WarpInstaller.clearPersistentConf(app)
+                } else if (confCache == null) {
+                    confCache = loadSaved(app)
+                }
 
                 stopInternal(keepService = false)
                 stopLocalHev(app)
@@ -106,7 +142,7 @@ object WarpController {
                         ),
                     )
 
-                    val outcome = runCatching { bringUpOnce(app, attempt) }
+                    val outcome = runCatching { bringUpOnce(app, attempt, allowRegister = true) }
                     if (outcome.isSuccess) {
                         startMonitor(app)
                         return@withContext Result.success(Unit)
@@ -115,6 +151,7 @@ object WarpController {
                         ?: Exception(outcome.exceptionOrNull()?.message ?: "fail")
                     Log.w(TAG, "attempt $attempt failed: ${lastErr.message}")
                     confCache = null
+                    WarpInstaller.clearPersistentConf(app)
                     regen++
                     tearDownTunnel()
                     delay(200)
@@ -138,18 +175,26 @@ object WarpController {
             }
         }
 
+    private fun loadSaved(app: Context): WarpConfigGenerator.Result? {
+        val text = WarpInstaller.loadPersistentConf(app) ?: return null
+        return runCatching { WarpConfigGenerator.fromConfText(text) }
+            .onSuccess { Log.i(TAG, "loaded saved conf ep=${it.endpoint}") }
+            .onFailure { Log.w(TAG, "saved conf bad: ${it.message}") }
+            .getOrNull()
+    }
+
     private fun shortError(e: Exception?): String {
         val m = e?.message ?: "fail"
         return when {
             m.contains("Unable to resolve", true) || m.contains("No address", true) ->
-                "DNS: api.cloudflareclient.com. LTE/другой Wi‑Fi"
+                "DNS: api.cloudflareclient.com. LTE/другой Wi‑Fi / вставьте conf"
             m.contains("Таймаут Cloudflare API", true) ||
                 m.contains("timeout", true) || m.contains("timed out", true) ->
-                "Таймаут CF API (HTTPS режется/медленно). LTE / VPN-off / 1.1.1.1 app"
+                "Таймаут CF API (reg режется). LTE / вставьте conf / 1.1.1.1 app"
             m.contains("handshake", true) || m.contains("rx=0", true) ->
                 "UDP CF (2408) не проходит. LTE / 1.1.1.1 app"
             m.contains("HTTP", true) -> m.take(80)
-            else -> m.take(140)
+            else -> m.take(160)
         }
     }
 
@@ -173,15 +218,22 @@ object WarpController {
         refreshHealth(context.applicationContext, fromUser = true)
     }
 
-    private suspend fun bringUpOnce(app: Context, attempt: Int) {
+    private suspend fun bringUpOnce(app: Context, attempt: Int, allowRegister: Boolean) {
         publish(
             mode = WarpMode.STARTING,
-            message = "WARP: регистрация Cloudflare…",
+            message = if (confCache != null) {
+                "WARP: сохранённый conf…"
+            } else {
+                "WARP: регистрация Cloudflare…"
+            },
             attempts = attempt,
         )
-        val generated = confCache ?: WarpConfigGenerator.generate().also {
-            confCache = it
-            WarpInstaller.writeConf(app, it.confText)
+        val generated = confCache ?: run {
+            if (!allowRegister) error("Нет conf и регистрация запрещена")
+            WarpConfigGenerator.generate(app).also {
+                confCache = it
+                WarpInstaller.savePersistentConf(app, it.confText)
+            }
         }
 
         ContextCompat.startForegroundService(
@@ -235,7 +287,7 @@ object WarpController {
                         lastRx = rx
                         lastRxChangeAt = System.currentTimeMillis()
                         confCache = variant
-                        WarpInstaller.writeConf(app, variant.confText)
+                        WarpInstaller.savePersistentConf(app, variant.confText)
                         publish(
                             mode = WarpMode.ON,
                             message = "WARP ВКЛ · $ep",

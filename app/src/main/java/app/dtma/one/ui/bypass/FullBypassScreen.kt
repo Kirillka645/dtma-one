@@ -1,6 +1,8 @@
 package app.dtma.one.ui.bypass
 
 import android.app.Activity
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
@@ -64,7 +66,40 @@ fun FullBypassScreen() {
                 },
                 onFailure = { e ->
                     "Не удалось после авто-попыток:\n${e.message}\n\n" +
-                        "LTE / 1.1.1.1 app / MTProto"
+                        "Если «Таймаут CF API» — API регистрации режется.\n" +
+                        "• LTE / другой Wi‑Fi\n" +
+                        "• «Вставить conf из буфера» (получите conf через 1.1.1.1 / wgcf на нормальной сети)\n" +
+                        "• MTProto в Telegram"
+                },
+            )
+            busy = false
+        }
+    }
+
+    fun doStartFromClipboard() {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val text = cm.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+        if (text.isBlank() || !text.contains("[Interface]", ignoreCase = true)) {
+            note = "Скопируйте WireGuard conf (с [Interface]/[Peer]/PrivateKey/Endpoint) в буфер"
+            return
+        }
+        busy = true
+        note = "Импорт conf без Cloudflare API…"
+        scope.launch {
+            val prepare = VpnService.prepare(context)
+            if (prepare != null) {
+                pendingStart = false
+                busy = false
+                note = "Сначала выдайте VPN-разрешение кнопкой «Включить WARP», затем снова вставьте conf"
+                return@launch
+            }
+            val result = WarpController.startFromConf(context, text)
+            note = result.fold(
+                onSuccess = {
+                    "Conf импортирован:\n${WarpController.statusLine()}"
+                },
+                onFailure = { e ->
+                    "Conf не принят: ${e.message}"
                 },
             )
             busy = false
@@ -196,6 +231,14 @@ fun FullBypassScreen() {
             Text(text = "Новый аккаунт + включить")
         }
 
+        OutlinedButton(
+            onClick = { doStartFromClipboard() },
+            enabled = !busy && warp.mode != WarpMode.STARTING,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(text = "Вставить conf из буфера (без API)")
+        }
+
         Text(text = "Фичи", style = MaterialTheme.typography.titleMedium)
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -220,10 +263,11 @@ fun FullBypassScreen() {
         }
 
         Text(
-            text = "• Быстрый DNS (параллельно 1.1.1.1/8.8.8.8, ~1с)\n" +
-                "• До 3 аккаунтов CF, не 10 (короткий старт)\n" +
-                "• Handshake ≤3 endpoint × ~1.2с (порты 2408/443/500)\n" +
-                "• Понятные ошибки (DNS / UDP / timeout)",
+            text = "• DNS bootstrap + DoH + multi-IP race\n" +
+                "• TCP/443 pre-probe + Wi‑Fi/LTE race + HTTP/1.1\n" +
+                "• Conf сохраняется — после 1 успеха API не нужен\n" +
+                "• Импорт conf из буфера если API заблокирован\n" +
+                "• Handshake ≤3 endpoint (2408/443/500)",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

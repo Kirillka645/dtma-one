@@ -1,34 +1,48 @@
 package app.dtma.one.bypass
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.util.Base64
 import android.util.Log
 import com.wireguard.crypto.KeyPair
 import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.SocketFactory
 
 /**
- * WARP registration with parallel multi-IP race (fixes "timeout Cloudflare API").
+ * WARP registration resilient to operator blocks / dead anycast.
  *
- * Instead of one slow hang on a dead anycast IP, we POST to several resolved IPs
- * at once (short timeout); first HTTP 200 wins.
+ * - Bootstrap DNS (UDP + DoH + static hints)
+ * - TCP/443 pre-probe of candidate IPs (skip blackholes)
+ * - Parallel race across IPs × API paths × Android networks (Wi‑Fi + LTE)
+ * - HTTP/1.1 only (some DPI breaks H2)
+ * - First HTTP 200 with config wins (≤12s overall)
  */
 object WarpConfigGenerator {
     private const val TAG = "DtmaWarp"
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+    private const val OVERALL_SEC = 12L
 
     private val regPaths = listOf(
         "/v0a2158/reg",
         "/v0a1922/reg",
+        "/v0a2471/reg",
     )
 
     val PEER_PORTS = listOf(2408, 443, 500)
@@ -44,7 +58,7 @@ object WarpConfigGenerator {
         val peerPublicKey: String = "",
     )
 
-    fun generate(): Result {
+    fun generate(context: Context? = null): Result {
         val keys = KeyPair()
         val privB64 = keys.privateKey.toBase64()
         val pubB64 = keys.publicKey.toBase64()
@@ -59,39 +73,52 @@ object WarpConfigGenerator {
             .toString()
         val body = bodyJson.toRequestBody(jsonMedia)
 
-        val ips = WarpBootstrapDns.allCandidates("api.cloudflareclient.com")
-        Log.i(TAG, "reg race IPs=$ips")
+        val rawIps = WarpBootstrapDns.allCandidates("api.cloudflareclient.com")
+        val liveIps = tcpPrefilter(rawIps, port = 443, timeoutMs = 500).ifEmpty { rawIps }
+        Log.i(TAG, "reg race raw=$rawIps live=$liveIps")
 
-        // Build targets: hostname (Dns) + pin each IP via single-IP Dns
-        data class Target(val label: String, val client: OkHttpClient, val url: String)
+        val networks = discoverNetworks(context)
+        Log.i(TAG, "reg networks=${networks.map { it.label }}")
+
+        data class Target(
+            val label: String,
+            val client: OkHttpClient,
+            val url: String,
+        )
 
         val targets = ArrayList<Target>()
-        for (path in regPaths) {
-            // Normal hostname — uses WarpBootstrapDns
-            targets += Target(
-                label = "host$path",
-                client = clientWithDns(WarpBootstrapDns, connectSec = 4, callSec = 6),
-                url = "https://api.cloudflareclient.com$path",
-            )
-            // Race each IP: URL still uses hostname for SNI/cert, Dns returns only that IP
-            for (ip in ips.take(6)) {
+        val pathList = regPaths
+        val ipList = liveIps.take(6)
+
+        for (net in networks) {
+            for (path in pathList) {
+                // Hostname + bootstrap DNS on this network
                 targets += Target(
-                    label = "$ip$path",
-                    client = clientWithDns(fixedDns(ip), connectSec = 3, callSec = 5),
+                    label = "${net.label}/dns$path",
+                    client = clientFor(net.factory, WarpBootstrapDns, connectSec = 4, callSec = 6),
                     url = "https://api.cloudflareclient.com$path",
                 )
+                for (ip in ipList) {
+                    targets += Target(
+                        label = "${net.label}/$ip$path",
+                        client = clientFor(net.factory, fixedDns(ip), connectSec = 3, callSec = 5),
+                        url = "https://api.cloudflareclient.com$path",
+                    )
+                }
             }
         }
 
-        val winner = AtomicReference<Pair<String, String>?>(null) // body, label
+        val winner = AtomicReference<Pair<String, String>?>(null)
         val errors = AtomicReference<String>("timeout")
+        val attempts = AtomicInteger(0)
         val latch = CountDownLatch(1)
-        val pool = Executors.newFixedThreadPool(targets.size.coerceAtMost(8))
+        val pool = Executors.newFixedThreadPool(targets.size.coerceAtMost(12))
 
         try {
             for (t in targets) {
                 pool.execute {
                     if (winner.get() != null) return@execute
+                    attempts.incrementAndGet()
                     try {
                         val req = Request.Builder()
                             .url(t.url)
@@ -118,8 +145,8 @@ object WarpConfigGenerator {
                     }
                 }
             }
-            // Overall budget — don't hang the UI for 30s+
-            val ok = latch.await(8, TimeUnit.SECONDS)
+
+            val ok = latch.await(OVERALL_SEC, TimeUnit.SECONDS)
             pool.shutdownNow()
 
             val win = winner.get()
@@ -130,9 +157,10 @@ object WarpConfigGenerator {
                 if (ok) {
                     "WARP API: ${errors.get()}"
                 } else {
-                    "Таймаут Cloudflare API (8с, ${targets.size} попыток). " +
-                        "Сеть режет CF или медленная. LTE / другой Wi‑Fi. " +
-                        "IPs=$ips err=${errors.get()}"
+                    "Таймаут Cloudflare API (${OVERALL_SEC}с, ${attempts.get()}/${targets.size} " +
+                        "попыток, nets=${networks.size}, liveIP=${liveIps.size}). " +
+                        "Часто API reg режется провайдером — LTE / другой Wi‑Fi / " +
+                        "вставьте conf из буфера. err=${errors.get()}"
                 },
             )
         } finally {
@@ -140,20 +168,158 @@ object WarpConfigGenerator {
         }
     }
 
+    /** Parse a WireGuard conf (from clipboard / file) into Result — no Cloudflare API. */
+    fun fromConfText(confText: String): Result {
+        val text = confText.trim()
+        require(text.contains("[Interface]", ignoreCase = true)) { "Нет [Interface]" }
+        require(text.contains("[Peer]", ignoreCase = true)) { "Нет [Peer]" }
+
+        fun field(name: String): String {
+            val re = Regex("""(?im)^\s*$name\s*=\s*(.+?)\s*$""")
+            return re.find(text)?.groupValues?.get(1)?.trim().orEmpty()
+        }
+
+        val privateKey = field("PrivateKey")
+        require(privateKey.length >= 40) { "PrivateKey не найден" }
+        val addressRaw = field("Address").substringBefore(',').trim()
+        require(addressRaw.isNotBlank()) { "Address не найден" }
+        val address = if (addressRaw.contains("/")) addressRaw else "$addressRaw/32"
+        val peerPublicKey = field("PublicKey")
+        require(peerPublicKey.length >= 40) { "Peer PublicKey не найден" }
+        val endpoint = field("Endpoint")
+        require(endpoint.contains(':')) { "Endpoint не найден (host:port)" }
+
+        // Client public key not required for GoBackend tunnel
+        val publicKey = ""
+
+        val conf = confFor(privateKey, address, peerPublicKey, endpoint)
+        val candidates = buildList {
+            add(endpoint)
+            val (ip, _) = WarpEndpoint.splitIpv4AndPort(endpoint)
+            if (ip.contains('.')) {
+                for (p in PEER_PORTS) add("$ip:$p")
+            }
+        }.distinct().take(3)
+
+        Log.i(TAG, "fromConf endpoint=$endpoint")
+        return Result(
+            confText = conf,
+            addressV4 = address,
+            endpoint = endpoint,
+            clientId = "",
+            privateKey = privateKey,
+            publicKey = publicKey,
+            endpointCandidates = candidates,
+            peerPublicKey = peerPublicKey,
+        )
+    }
+
+    private data class NetSlot(val label: String, val factory: SocketFactory?)
+
+    private fun discoverNetworks(context: Context?): List<NetSlot> {
+        val out = ArrayList<NetSlot>()
+        // Always include default route first
+        out += NetSlot("default", null)
+        if (context == null) return out
+
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val nets = cm.allNetworks.mapNotNull { n ->
+                val caps = cm.getNetworkCapabilities(n) ?: return@mapNotNull null
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return@mapNotNull null
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+                val label = when {
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cell"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "eth"
+                    else -> "net"
+                }
+                NetSlot(label, NetworkSocketFactory(n))
+            }
+            // Prefer cellular first (often less censored for CF API than Wi‑Fi)
+            val ordered = nets.sortedBy { if (it.label == "cell") 0 else 1 }
+            // Avoid duplicate "default" only — keep real nets
+            (listOf(NetSlot("default", null)) + ordered).distinctBy { it.label to (it.factory != null) }
+        } catch (e: Exception) {
+            Log.w(TAG, "discoverNetworks: ${e.message}")
+            out
+        }
+    }
+
+    /** Parallel TCP connect — keep IPs that accept connection. */
+    private fun tcpPrefilter(ips: List<String>, port: Int, timeoutMs: Int): List<String> {
+        if (ips.isEmpty()) return emptyList()
+        val live = java.util.Collections.synchronizedList(ArrayList<String>())
+        val latch = CountDownLatch(ips.size)
+        for (ip in ips) {
+            Thread({
+                try {
+                    Socket().use { s ->
+                        s.soTimeout = timeoutMs
+                        s.connect(InetSocketAddress(ip, port), timeoutMs)
+                        live += ip
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    latch.countDown()
+                }
+            }, "warp-tcp-$ip").apply { isDaemon = true; start() }
+        }
+        latch.await((timeoutMs + 200).toLong(), TimeUnit.MILLISECONDS)
+        Log.i(TAG, "tcp/443 live=$live / $ips")
+        return live.toList()
+    }
+
+    private class NetworkSocketFactory(private val network: Network) : SocketFactory() {
+        private fun bound(): Socket {
+            val s = Socket()
+            try {
+                network.bindSocket(s)
+            } catch (e: Exception) {
+                Log.d(TAG, "bindSocket: ${e.message}")
+            }
+            return s
+        }
+
+        override fun createSocket(): Socket = bound()
+        override fun createSocket(host: String?, port: Int): Socket =
+            bound().also { it.connect(InetSocketAddress(host, port), 5_000) }
+        override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): Socket =
+            createSocket(host, port)
+        override fun createSocket(host: InetAddress?, port: Int): Socket =
+            bound().also { it.connect(InetSocketAddress(host, port), 5_000) }
+        override fun createSocket(
+            address: InetAddress?,
+            port: Int,
+            localAddress: InetAddress?,
+            localPort: Int,
+        ): Socket = createSocket(address, port)
+    }
+
     private fun fixedDns(ip: String): Dns = object : Dns {
         override fun lookup(hostname: String): List<InetAddress> =
             listOf(InetAddress.getByName(ip))
     }
 
-    private fun clientWithDns(dns: Dns, connectSec: Long, callSec: Long): OkHttpClient =
-        OkHttpClient.Builder()
+    private fun clientFor(
+        socketFactory: SocketFactory?,
+        dns: Dns,
+        connectSec: Long,
+        callSec: Long,
+    ): OkHttpClient {
+        val b = OkHttpClient.Builder()
             .dns(dns)
+            .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(connectSec, TimeUnit.SECONDS)
             .readTimeout(callSec, TimeUnit.SECONDS)
             .writeTimeout(callSec, TimeUnit.SECONDS)
             .callTimeout(callSec, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
-            .build()
+        if (socketFactory != null) {
+            b.socketFactory(socketFactory)
+        }
+        return b.build()
+    }
 
     private fun parseResponse(text: String, privateKeyB64: String, publicKeyB64: String): Result {
         val root = JSONObject(text)
