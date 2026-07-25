@@ -34,6 +34,8 @@ data class UserSettings(
     val dismissedUpdateTag: String = "",
     val lastKnownUpdateTag: String = "",
     val lastKnownUpdateUrl: String = "",
+    val lastKnownApkUrl: String = "",
+    val lastKnownApkName: String = "",
     /**
      * For Telegram DC IPs: try alternate underlying network (e.g. cellular vs Wi‑Fi)
      * before default path. No remote proxy / SOCKS5 required when only one path is blocked.
@@ -84,6 +86,8 @@ class SettingsRepository(private val context: Context) {
         val dismissedUpdate = stringPreferencesKey("dismissed_update")
         val knownUpdateTag = stringPreferencesKey("known_update_tag")
         val knownUpdateUrl = stringPreferencesKey("known_update_url")
+        val knownApkUrl = stringPreferencesKey("known_apk_url")
+        val knownApkName = stringPreferencesKey("known_apk_name")
         val tgMultipath = booleanPreferencesKey("tg_multipath")
         val tgSmart = booleanPreferencesKey("tg_smart")
         val dohDns = booleanPreferencesKey("doh_dns")
@@ -107,10 +111,17 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[Keys.lastUpdateCheck] = nowMs }
     }
 
-    suspend fun setKnownUpdate(tag: String, url: String) {
+    suspend fun setKnownUpdate(
+        tag: String,
+        url: String,
+        apkUrl: String = "",
+        apkName: String = "",
+    ) {
         context.dataStore.edit {
             it[Keys.knownUpdateTag] = tag
             it[Keys.knownUpdateUrl] = url
+            it[Keys.knownApkUrl] = apkUrl
+            it[Keys.knownApkName] = apkName
         }
     }
 
@@ -118,6 +129,8 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit {
             it[Keys.knownUpdateTag] = ""
             it[Keys.knownUpdateUrl] = ""
+            it[Keys.knownApkUrl] = ""
+            it[Keys.knownApkName] = ""
         }
     }
 
@@ -144,6 +157,8 @@ class SettingsRepository(private val context: Context) {
             dismissedUpdateTag = p[Keys.dismissedUpdate].orEmpty(),
             lastKnownUpdateTag = p[Keys.knownUpdateTag].orEmpty(),
             lastKnownUpdateUrl = p[Keys.knownUpdateUrl].orEmpty(),
+            lastKnownApkUrl = p[Keys.knownApkUrl].orEmpty(),
+            lastKnownApkName = p[Keys.knownApkName].orEmpty(),
             telegramMultipath = p[Keys.tgMultipath] ?: true,
             telegramSmartPath = p[Keys.tgSmart] ?: true,
             dohDns = p[Keys.dohDns] ?: true,
@@ -172,6 +187,8 @@ class SettingsRepository(private val context: Context) {
         prefs[Keys.dismissedUpdate] = next.dismissedUpdateTag
         prefs[Keys.knownUpdateTag] = next.lastKnownUpdateTag
         prefs[Keys.knownUpdateUrl] = next.lastKnownUpdateUrl
+        prefs[Keys.knownApkUrl] = next.lastKnownApkUrl
+        prefs[Keys.knownApkName] = next.lastKnownApkName
         prefs[Keys.tgMultipath] = next.telegramMultipath
         prefs[Keys.tgSmart] = next.telegramSmartPath
         prefs[Keys.dohDns] = next.dohDns

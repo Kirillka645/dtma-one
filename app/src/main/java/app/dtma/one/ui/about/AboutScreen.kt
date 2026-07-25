@@ -1,7 +1,5 @@
 package app.dtma.one.ui.about
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,7 +7,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -23,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dtma.one.BuildConfig
 import app.dtma.one.R
+import app.dtma.one.ui.update.InAppUpdateCard
 import app.dtma.one.update.UpdateCheckState
 import app.dtma.one.update.UpdateNotifier
 import kotlinx.coroutines.launch
@@ -47,6 +45,13 @@ fun AboutScreen() {
         Text("License: Apache-2.0")
         Text("Package: ${BuildConfig.APPLICATION_ID}")
 
+        Text("Обновления", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Как в proxy-клиентах: проверка GitHub Releases, скачивание APK " +
+                "и установка прямо из приложения (без браузера).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         OutlinedButton(
             onClick = {
                 scope.launch { UpdateNotifier.check(context, force = true) }
@@ -64,17 +69,7 @@ fun AboutScreen() {
         when (val s = updateState) {
             is UpdateCheckState.UpToDate -> Text(stringResource(R.string.update_up_to_date))
             is UpdateCheckState.Available -> {
-                Text(stringResource(R.string.update_banner_title, s.update.versionName))
-                Button(
-                    onClick = {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(s.update.releaseUrl)),
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(stringResource(R.string.update_banner_open))
-                }
+                InAppUpdateCard(update = s.update, showDismiss = false)
             }
             is UpdateCheckState.Error -> Text(
                 stringResource(R.string.update_check_error, s.message),
@@ -85,17 +80,14 @@ fun AboutScreen() {
         Text("What this app is", style = MaterialTheme.typography.titleMedium)
         Text(
             "Local Android VpnService with PAER (Passive Adaptive Endpoint Racing). " +
-                "No remote VPN server, proxy, relay, cloud intermediary, ads, or analytics.",
+                "Optional in-app Cloudflare WARP. No DTMA remote server, ads, or analytics.",
         )
 
         Text("Limitations", style = MaterialTheme.typography.titleMedium)
         Text(
-            "• Does not guarantee bypass of blocking.\n" +
-                "• Helps only when at least one legitimate endpoint is reachable.\n" +
-                "• No TLS interception/MITM; third-party certs are not validated by DTMA One.\n" +
-                "• QUIC endpoint racing: NOT_IMPLEMENTED (UDP still forwarded).\n" +
-                "• HTTPS/SVCB full parsing depends on platform DNS exposure.\n" +
-                "• ICMP not forwarded in MVP.\n" +
+            "• Local mode does not guarantee bypass of IP blocks.\n" +
+                "• WARP uses Cloudflare free network (not DTMA infrastructure).\n" +
+                "• No TLS interception/MITM.\n" +
                 "• Debug APK is for testing only.",
         )
 

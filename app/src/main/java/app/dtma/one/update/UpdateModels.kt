@@ -8,6 +8,10 @@ data class AvailableUpdate(
     val versionName: String,
     val releaseUrl: String,
     val notes: String,
+    /** Direct APK asset URL from GitHub Releases (for in-app install). */
+    val apkUrl: String? = null,
+    val apkName: String? = null,
+    val apkSizeBytes: Long = 0L,
 )
 
 sealed class UpdateCheckState {
@@ -16,4 +20,13 @@ sealed class UpdateCheckState {
     data object UpToDate : UpdateCheckState()
     data class Available(val update: AvailableUpdate) : UpdateCheckState()
     data class Error(val message: String) : UpdateCheckState()
+}
+
+/** In-app APK download / install (like KupuProxy-style self-update). */
+sealed class ApkInstallState {
+    data object Idle : ApkInstallState()
+    data class Downloading(val progress: Float, val received: Long, val total: Long) : ApkInstallState()
+    data class Ready(val path: String) : ApkInstallState()
+    data object Installing : ApkInstallState()
+    data class Error(val message: String) : ApkInstallState()
 }

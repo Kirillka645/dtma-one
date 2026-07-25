@@ -37,6 +37,12 @@
     <string name="update_banner_body">A newer version is on GitHub. Download the APK from the release page.</string>
     <string name="update_banner_open">Open release</string>
     <string name="update_banner_dismiss">Later</string>
+    <string name="update_install_in_app">Update in app</string>
+    <string name="update_download_install">Download &amp; install</string>
+    <string name="update_install">Install</string>
+    <string name="update_downloading">Downloading… %1$d%%</string>
+    <string name="update_installing">Opening installer…</string>
+    <string name="update_no_apk">No APK in release — open GitHub</string>
     <string name="update_check_setting">Check for updates</string>
     <string name="update_check_setting_hint">Uses GitHub Releases API (no analytics)</string>
     <string name="update_check_now">Check for updates now</string>

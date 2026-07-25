@@ -37,6 +37,12 @@
     <string name="update_banner_body">На GitHub есть более новая версия. Скачайте APK со страницы релиза.</string>
     <string name="update_banner_open">Открыть релиз</string>
     <string name="update_banner_dismiss">Позже</string>
+    <string name="update_install_in_app">Обновить в приложении</string>
+    <string name="update_download_install">Скачать и установить</string>
+    <string name="update_install">Установить</string>
+    <string name="update_downloading">Загрузка… %1$d%%</string>
+    <string name="update_installing">Открытие установщика…</string>
+    <string name="update_no_apk">В релизе нет APK — откройте GitHub</string>
     <string name="update_check_setting">Проверять обновления</string>
     <string name="update_check_setting_hint">GitHub Releases API, без аналитики</string>
     <string name="update_check_now">Проверить обновления</string>

@@ -3,7 +3,6 @@ package app.dtma.one.update
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -17,7 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 
 /**
- * Runs update checks, updates in-app state, and posts a system notification once per tag.
+ * Runs update checks, in-app state, notification; install via [ApkUpdater].
  */
 object UpdateNotifier {
     private const val TAG = "DtmaUpdate"
@@ -46,7 +45,6 @@ object UpdateNotifier {
         if (!force && settings.lastUpdateCheckMs > 0 &&
             now - settings.lastUpdateCheckMs < MIN_AUTO_INTERVAL_MS
         ) {
-            // Restore banner if we already know about a newer tag that was not dismissed.
             val cached = settings.lastKnownUpdateTag
             if (cached.isNotBlank() &&
                 cached != settings.dismissedUpdateTag &&
@@ -60,6 +58,8 @@ object UpdateNotifier {
                             "https://github.com/Kirillka645/dtma-one/releases"
                         },
                         notes = "",
+                        apkUrl = settings.lastKnownApkUrl.ifBlank { null },
+                        apkName = settings.lastKnownApkName.ifBlank { null },
                     ),
                 )
             }
@@ -77,9 +77,14 @@ object UpdateNotifier {
                     _state.value = UpdateCheckState.UpToDate
                     Log.i(TAG, "up to date")
                 } else {
-                    repo.setKnownUpdate(update.tag, update.releaseUrl)
+                    repo.setKnownUpdate(
+                        tag = update.tag,
+                        url = update.releaseUrl,
+                        apkUrl = update.apkUrl.orEmpty(),
+                        apkName = update.apkName.orEmpty(),
+                    )
                     _state.value = UpdateCheckState.Available(update)
-                    Log.i(TAG, "update available: ${update.tag}")
+                    Log.i(TAG, "update available: ${update.tag} apk=${update.apkUrl}")
                     if (update.tag != settings.dismissedUpdateTag) {
                         showNotification(app, update)
                     }
@@ -97,18 +102,21 @@ object UpdateNotifier {
             DtmaApp.instance.settingsRepository.dismissUpdate(current.update.tag)
         }
         _state.value = UpdateCheckState.Idle
+        ApkUpdater.reset()
         NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
+    }
+
+    suspend fun downloadAndInstall(context: Context) {
+        val current = _state.value
+        if (current !is UpdateCheckState.Available) {
+            ApkUpdater.reset()
+            return
+        }
+        ApkUpdater.downloadAndInstall(context, current.update)
     }
 
     private fun showNotification(context: Context, update: AvailableUpdate) {
         try {
-            val openRelease = Intent(Intent.ACTION_VIEW, Uri.parse(update.releaseUrl))
-            val releasePi = PendingIntent.getActivity(
-                context,
-                0,
-                openRelease,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
             val openApp = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra(EXTRA_OPEN_UPDATE, true)
@@ -128,17 +136,12 @@ object UpdateNotifier {
                 .setContentTitle(context.getString(R.string.update_notification_title))
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setContentIntent(releasePi)
+                .setContentIntent(appPi)
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .addAction(
                     0,
-                    context.getString(R.string.update_notification_open),
-                    releasePi,
-                )
-                .addAction(
-                    0,
-                    context.getString(R.string.update_notification_app),
+                    context.getString(R.string.update_install_in_app),
                     appPi,
                 )
                 .build()
