@@ -125,6 +125,12 @@ object WarpConfigGenerator {
 
         // Append reserved= for wireguard-go uapi if we can inject later via userspace string.
         // client_id is 3-byte cookie Cloudflare expects on handshake packets.
+        // Sanity: WireGuard rejects port 0 / missing port hard with ParseException.
+        val epPort = endpoint.substringAfterLast(':', "").toIntOrNull()
+        if (epPort == null || epPort !in 1..65535) {
+            error("Bad WARP endpoint port in '$endpoint' (API host/v4 malformed)")
+        }
+
         Log.i(TAG, "WARP conf addr=$v4 endpoint=$endpoint clientIdLen=${clientId.length}")
         return Result(
             confText = conf,
@@ -137,17 +143,9 @@ object WarpConfigGenerator {
     }
 
     private fun resolveEndpoint(endpointObj: JSONObject): String {
-        val hostField = endpointObj.optString("host").orEmpty()
-        // host often "engage.cloudflareclient.com:2408"
-        val v4 = endpointObj.optString("v4").orEmpty().trim()
-        val portFromHost = hostField.substringAfterLast(':', missingDelimiterValue = "2408")
-            .toIntOrNull() ?: 2408
-        if (v4.isNotBlank()) {
-            val ip = v4.substringBefore('/')
-            return "$ip:$portFromHost"
-        }
-        if (hostField.isNotBlank()) return hostField
-        return "engage.cloudflareclient.com:2408"
+        val hostField = endpointObj.optString("host").orEmpty().trim()
+        val v4Field = endpointObj.optString("v4").orEmpty().trim().substringBefore('/')
+        return WarpEndpoint.resolve(hostField, v4Field)
     }
 
     /** Decode Cloudflare client_id (base64) to 3 bytes for WireGuard reserved field. */
