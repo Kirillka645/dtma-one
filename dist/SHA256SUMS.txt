@@ -1,0 +1,2 @@
+bbb12551a76df4666369da53cd5ada99b93e88f232febb2d6ac240a13412aa39  dtma-one-0.1.0-debug.apk
+0b3be5f2b1ab7451695a36aded11f2027725ece9eecdccff998d8527eede579e  dtma-one-0.1.0-release-unsigned.apk

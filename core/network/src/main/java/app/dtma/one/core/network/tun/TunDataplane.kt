@@ -10,25 +10,22 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
-import java.nio.channels.SelectionKey
-import java.nio.channels.Selector
 import java.nio.channels.SocketChannel
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
- * Userspace TUN dataplane: IPv4 TCP/UDP forwarding with VpnService.protect().
+ * Userspace TUN dataplane: IPv4 TCP/UDP/DNS with VpnService.protect().
  *
- * Architecture (ADR-0001): pure-Kotlin userspace relay — no opaque .so.
- * - DNS to VPN DNS (10.0.0.1) handled by SimpleDnsServer (PAER-ordered answers).
- * - TCP: protect()+connect to original destination (or PAER-selected remap when hostname known).
- * - UDP: protect()+relay.
- * - IPv6: accepted on TUN when enabled; TCP/UDP forwarding supported when addresses parse.
- *
- * Bidirectional NAT mapping keeps originalDestination presentation for the app
- * when destination remapping is applied.
+ * Critical design points:
+ * - DNS is handled off the TUN reader thread (blocking upstream DNS must not stall the stack).
+ * - TCP sends proper ACKs to the client; without them Android sockets stall (Telegram, browsers).
+ * - IPv6 is not claimed unless a full IPv6 path exists (otherwise traffic is black-holed).
  */
 class TunDataplane(
     private val vpnService: VpnService,
@@ -36,17 +33,22 @@ class TunDataplane(
     private val dnsServer: SimpleDnsServer,
     private val sessionCache: DnsSessionCache,
     private val vpnDnsV4: ByteArray = byteArrayOf(10, 0, 0, 1),
-    private val selectDestination: (hostname: String?, originalIp: String, port: Int) -> String? = { _, ip, _ -> ip },
+    private val selectDestination: (hostname: String?, originalIp: String, port: Int) -> String? =
+        { _, ip, _ -> ip },
 ) {
     companion object {
         private const val TAG = "DtmaTun"
         private const val MTU = 1500
+        private const val TCP_IDLE_MS = 180_000L
+        private const val UDP_IDLE_MS = 90_000L
     }
 
     private val running = AtomicBoolean(false)
     private val activeFlows = AtomicInteger(0)
     private val tcpFlows = ConcurrentHashMap<FlowKey, TcpFlow>()
     private val udpFlows = ConcurrentHashMap<FlowKey, UdpFlow>()
+    private val dnsExecutor = Executors.newFixedThreadPool(2)
+    private val outboundQueue = LinkedBlockingQueue<ByteArray>(512)
 
     @Volatile
     var onFlowCountChanged: ((Int) -> Unit)? = null
@@ -59,20 +61,10 @@ class TunDataplane(
         val protocol: Int,
     )
 
-    data class NatMapping(
-        val originalSource: String,
-        val originalDestination: String,
-        val selectedDestination: String,
-        val protocol: Int,
-        val createdAt: Long,
-        val networkContextId: String?,
-    )
-
-    private val natTable = ConcurrentHashMap<FlowKey, NatMapping>()
-
     fun start() {
         if (!running.compareAndSet(false, true)) return
         thread(name = "dtma-tun-reader", isDaemon = true) { readerLoop() }
+        thread(name = "dtma-tun-writer", isDaemon = true) { writerLoop() }
         thread(name = "dtma-tun-tcp", isDaemon = true) { tcpPumpLoop() }
         thread(name = "dtma-tun-udp", isDaemon = true) { udpPumpLoop() }
         thread(name = "dtma-tun-cleaner", isDaemon = true) { cleanerLoop() }
@@ -85,8 +77,9 @@ class TunDataplane(
         udpFlows.values.forEach { it.close() }
         tcpFlows.clear()
         udpFlows.clear()
-        natTable.clear()
         activeFlows.set(0)
+        dnsExecutor.shutdownNow()
+        outboundQueue.clear()
         try {
             tunInterface.close()
         } catch (_: Exception) {
@@ -106,7 +99,7 @@ class TunDataplane(
                     if (!running.get()) break
                     continue
                 }
-                handlePacket(packet, length)
+                handlePacket(packet.copyOf(length), length)
             } catch (e: IOException) {
                 if (running.get()) Log.w(TAG, "read error: ${e.message}")
                 break
@@ -116,46 +109,25 @@ class TunDataplane(
         }
     }
 
-    private fun writeToTun(packet: ByteArray) {
-        try {
-            FileOutputStream(tunInterface.fileDescriptor).use { /* don't close fd */ }
-            // FileOutputStream closing would close the fd — use channel write carefully
-        } catch (_: Exception) {
-        }
-        try {
-            val fos = FileOutputStream(tunInterface.fileDescriptor)
-            // Writing without closing the underlying FD: duplicate approach
-            val channel = fos.channel
-            channel.write(ByteBuffer.wrap(packet))
-            // Do not close fos — would close TUN. Detach by leaking intentionally is wrong.
-            // Use reflection-free: ParcelFileDescriptor.AutoCloseOutputStream is same issue.
-        } catch (e: Exception) {
-            Log.w(TAG, "write tun failed: ${e.message}")
-        }
-    }
-
-    private val tunOutLock = Any()
-    private var tunOut: FileOutputStream? = null
-
-    private fun ensureOut(): FileOutputStream {
-        val existing = tunOut
-        if (existing != null) return existing
-        synchronized(tunOutLock) {
-            if (tunOut == null) {
-                tunOut = FileOutputStream(tunInterface.fileDescriptor)
+    private fun writerLoop() {
+        val out = FileOutputStream(tunInterface.fileDescriptor)
+        while (running.get()) {
+            try {
+                val pkt = outboundQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                out.write(pkt)
+            } catch (e: InterruptedException) {
+                break
+            } catch (e: Exception) {
+                if (running.get()) Log.w(TAG, "tun write: ${e.message}")
             }
-            return tunOut!!
         }
     }
 
     private fun writePacket(packet: ByteArray) {
-        try {
-            synchronized(tunOutLock) {
-                ensureOut().write(packet)
-                ensureOut().flush()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "tun write: ${e.message}")
+        if (!outboundQueue.offer(packet)) {
+            // Drop oldest to make room for control packets
+            outboundQueue.poll()
+            outboundQueue.offer(packet)
         }
     }
 
@@ -164,33 +136,36 @@ class TunDataplane(
         when (parsed.protocol) {
             IpPacketParser.PROTO_UDP -> handleUdp(parsed)
             IpPacketParser.PROTO_TCP -> handleTcp(parsed)
-            else -> {
-                // ICMP and others: drop silently in MVP (document limitation)
-            }
+            else -> Unit // ICMP etc. not implemented
         }
     }
 
     private fun handleUdp(p: ParsedPacket) {
+        if (p.version != IpVersion.V4) return // IPv6 UDP not implemented
         val dstIp = p.destinationAddress.hostAddress ?: return
         val srcIp = p.sourceAddress.hostAddress ?: return
-        val isDns = p.destinationPort == 53 && p.destinationAddress.address.contentEquals(vpnDnsV4)
+        val isDns = p.destinationPort == 53 &&
+            p.destinationAddress.address.contentEquals(vpnDnsV4)
 
         if (isDns) {
-            // payload is UDP header + DNS
             if (p.payload.size < 8) return
             val dnsQuery = p.payload.copyOfRange(8, p.payload.size)
-            val response = dnsServer.handleQuery(dnsQuery) ?: return
-            val src = p.destinationAddress.address
-            val dst = p.sourceAddress.address
-            if (src.size == 4 && dst.size == 4) {
-                val pkt = PacketBuilder.ipv4Udp(
-                    src = src,
-                    dst = dst,
-                    srcPort = 53,
-                    dstPort = p.sourcePort,
-                    payload = response,
-                )
-                writePacket(pkt)
+            val clientAddr = p.sourceAddress.address
+            val clientPort = p.sourcePort
+            dnsExecutor.execute {
+                try {
+                    val response = dnsServer.handleQuery(dnsQuery) ?: return@execute
+                    val pkt = PacketBuilder.ipv4Udp(
+                        src = vpnDnsV4,
+                        dst = clientAddr,
+                        srcPort = 53,
+                        dstPort = clientPort,
+                        payload = response,
+                    )
+                    writePacket(pkt)
+                } catch (e: Exception) {
+                    Log.w(TAG, "dns handle: ${e.message}")
+                }
             }
             return
         }
@@ -201,50 +176,48 @@ class TunDataplane(
             val channel = DatagramChannel.open()
             channel.configureBlocking(false)
             if (!vpnService.protect(channel.socket())) {
-                Log.w(TAG, "protect() failed for UDP")
+                Log.w(TAG, "protect() failed for UDP $dstIp:${p.destinationPort}")
                 channel.close()
                 return
             }
             val hostname = sessionCache.hostnameForIp(dstIp)
             val selected = selectDestination(hostname, dstIp, p.destinationPort) ?: dstIp
-            if (selected != dstIp && hostname != null) {
-                natTable[key] = NatMapping(
-                    originalSource = "$srcIp:${p.sourcePort}",
-                    originalDestination = "$dstIp:${p.destinationPort}",
-                    selectedDestination = "$selected:${p.destinationPort}",
-                    protocol = IpPacketParser.PROTO_UDP,
-                    createdAt = System.currentTimeMillis(),
-                    networkContextId = null,
-                )
+            try {
+                channel.connect(InetSocketAddress(selected, p.destinationPort))
+            } catch (e: Exception) {
+                channel.close()
+                return
             }
-            channel.connect(InetSocketAddress(selected, p.destinationPort))
-            flow = UdpFlow(key, channel, p.sourceAddress, p.destinationAddress, p.sourcePort, p.destinationPort)
+            flow = UdpFlow(
+                key, channel, p.sourceAddress, p.destinationAddress,
+                p.sourcePort, p.destinationPort,
+            )
             udpFlows[key] = flow
-            bumpFlows()
+            bumpFlows(+1)
         }
         if (p.payload.size > 8) {
             val data = ByteBuffer.wrap(p.payload, 8, p.payload.size - 8)
             try {
                 flow.channel.write(data)
-            } catch (e: Exception) {
+                flow.lastActivityMs = System.currentTimeMillis()
+            } catch (_: Exception) {
                 flow.close()
-                udpFlows.remove(key)
-                bumpFlows(-1)
+                if (udpFlows.remove(key) != null) bumpFlows(-1)
             }
         }
     }
 
     private fun handleTcp(p: ParsedPacket) {
+        if (p.version != IpVersion.V4) return
         if (p.payload.size < 20) return
         val dataOffset = ((p.payload[12].toInt() and 0xF0) ushr 4) * 4
         if (dataOffset < 20 || p.payload.size < dataOffset) return
         val flags = p.payload[13].toInt() and 0xFF
         val syn = flags and 0x02 != 0
-        val ack = flags and 0x10 != 0
+        val ackFlag = flags and 0x10 != 0
         val fin = flags and 0x01 != 0
         val rst = flags and 0x04 != 0
-        val seq = ByteBuffer.wrap(p.payload, 4, 4).int
-        val ackNum = ByteBuffer.wrap(p.payload, 8, 4).int
+        val seq = readInt(p.payload, 4)
         val payloadData = if (p.payload.size > dataOffset) {
             p.payload.copyOfRange(dataOffset, p.payload.size)
         } else {
@@ -256,36 +229,30 @@ class TunDataplane(
         val key = FlowKey(srcIp, p.sourcePort, dstIp, p.destinationPort, IpPacketParser.PROTO_TCP)
 
         if (rst) {
-            tcpFlows.remove(key)?.close()
-            bumpFlows(-1)
+            tcpFlows.remove(key)?.let {
+                it.close()
+                bumpFlows(-1)
+            }
             return
         }
 
         var flow = tcpFlows[key]
         if (flow == null) {
-            if (!syn || ack) return
+            // Only accept new flows on pure SYN
+            if (!syn || ackFlag) return
             val channel = SocketChannel.open()
             channel.configureBlocking(false)
             if (!vpnService.protect(channel.socket())) {
-                Log.w(TAG, "protect() failed for TCP")
+                Log.w(TAG, "protect() failed for TCP $dstIp:${p.destinationPort}")
                 channel.close()
                 return
             }
             val hostname = sessionCache.hostnameForIp(dstIp)
             val selected = selectDestination(hostname, dstIp, p.destinationPort) ?: dstIp
-            if (selected != dstIp && hostname != null) {
-                natTable[key] = NatMapping(
-                    originalSource = "$srcIp:${p.sourcePort}",
-                    originalDestination = "$dstIp:${p.destinationPort}",
-                    selectedDestination = "$selected:${p.destinationPort}",
-                    protocol = IpPacketParser.PROTO_TCP,
-                    createdAt = System.currentTimeMillis(),
-                    networkContextId = null,
-                )
-            }
             try {
                 channel.connect(InetSocketAddress(selected, p.destinationPort))
             } catch (e: Exception) {
+                Log.w(TAG, "connect start failed $selected:${p.destinationPort}: ${e.message}")
                 channel.close()
                 return
             }
@@ -297,24 +264,59 @@ class TunDataplane(
                 clientPort = p.sourcePort,
                 remotePort = p.destinationPort,
                 clientIsn = seq,
+                clientNextSeq = seq + 1, // SYN consumes 1
             )
             tcpFlows[key] = flow
-            bumpFlows()
+            bumpFlows(+1)
+            Log.d(TAG, "TCP SYN $srcIp:${p.sourcePort} -> $selected:${p.destinationPort} (presented $dstIp)")
+            return
         }
 
         flow.lastActivityMs = System.currentTimeMillis()
-        if (syn && !ack) {
-            // Wait until channel connected; SYN-ACK generated in tcpPumpLoop
-            flow.pendingClientSyn = true
+
+        // Retransmitted SYN while still connecting
+        if (syn && !ackFlag && !flow.connected) {
             flow.clientIsn = seq
+            flow.clientNextSeq = seq + 1
+            flow.pendingClientSyn = true
             return
         }
-        if (payloadData.isNotEmpty()) {
-            flow.outQueue.add(payloadData)
-            flow.clientSeq = seq + payloadData.size
-        }
-        if (fin) {
-            flow.clientFin = true
+
+        // After handshake: accept in-order data and always ACK progress.
+        if (flow.established) {
+            if (payloadData.isNotEmpty()) {
+                val expected = flow.clientNextSeq
+                when {
+                    seq == expected -> {
+                        flow.outQueue.add(payloadData)
+                        flow.clientNextSeq = expected + payloadData.size
+                        flow.needAck = true
+                    }
+                    seqLess(seq, expected) -> {
+                        // duplicate — re-ACK
+                        flow.needAck = true
+                    }
+                    else -> {
+                        // out-of-order: ACK what we have (simple stack)
+                        flow.needAck = true
+                    }
+                }
+            } else if (ackFlag) {
+                // pure ACK from client; nothing to queue
+            }
+            if (fin) {
+                // FIN consumes 1 sequence number if this is a new FIN
+                if (!flow.clientFin) {
+                    if (payloadData.isEmpty() && seq == flow.clientNextSeq) {
+                        flow.clientNextSeq += 1
+                    } else if (payloadData.isNotEmpty()) {
+                        // FIN with data already advanced clientNextSeq by payload size; +1 for FIN
+                        flow.clientNextSeq += 1
+                    }
+                    flow.clientFin = true
+                    flow.needAck = true
+                }
+            }
         }
     }
 
@@ -322,17 +324,16 @@ class TunDataplane(
         val buf = ByteBuffer.allocate(MTU)
         while (running.get()) {
             try {
-                val flows = tcpFlows.values.toList()
-                for (flow in flows) {
+                for (flow in tcpFlows.values.toList()) {
                     try {
                         pumpTcp(flow, buf)
                     } catch (e: Exception) {
+                        Log.d(TAG, "tcp flow end ${flow.key}: ${e.message}")
                         flow.close()
-                        tcpFlows.remove(flow.key)
-                        bumpFlows(-1)
+                        if (tcpFlows.remove(flow.key) != null) bumpFlows(-1)
                     }
                 }
-                Thread.sleep(2)
+                Thread.sleep(1)
             } catch (_: InterruptedException) {
                 break
             }
@@ -342,35 +343,40 @@ class TunDataplane(
     private fun pumpTcp(flow: TcpFlow, buf: ByteBuffer) {
         val ch = flow.channel
         if (!flow.connected) {
-            if (ch.finishConnect()) {
-                flow.connected = true
-                if (flow.pendingClientSyn) {
-                    // Send SYN-ACK to client through TUN
-                    val synAck = buildTcpPacket(
-                        src = flow.remotePresentedAddr.address,
-                        dst = flow.clientAddr.address,
-                        srcPort = flow.remotePort,
-                        dstPort = flow.clientPort,
+            try {
+                if (ch.finishConnect()) {
+                    flow.connected = true
+                    flow.established = true
+                    // SYN-ACK to client
+                    sendTcp(
+                        flow,
                         seq = flow.serverIsn,
-                        ack = flow.clientIsn + 1,
+                        ack = flow.clientNextSeq,
                         flags = 0x12, // SYN+ACK
                         payload = ByteArray(0),
                     )
-                    if (synAck != null) writePacket(synAck)
-                    flow.serverSeq = flow.serverIsn + 1
-                    flow.clientSeq = flow.clientIsn + 1
+                    flow.serverNextSeq = flow.serverIsn + 1
                     flow.pendingClientSyn = false
+                    Log.d(TAG, "TCP ESTABLISHED ${flow.key.dstIp}:${flow.key.dstPort}")
+                } else if (System.currentTimeMillis() - flow.createdAt > 15_000) {
+                    throw IOException("connect timeout")
                 }
-            } else if (System.currentTimeMillis() - flow.createdAt > 12_000) {
-                throw IOException("connect timeout")
+            } catch (e: IOException) {
+                throw e
+            } catch (e: Exception) {
+                throw IOException("connect failed: ${e.message}", e)
             }
             return
         }
 
-        // Write queued client payload to remote
+        // Flush client->remote
         while (flow.outQueue.isNotEmpty()) {
             val data = flow.outQueue.first()
-            val n = ch.write(ByteBuffer.wrap(data))
+            val n = try {
+                ch.write(ByteBuffer.wrap(data))
+            } catch (e: Exception) {
+                throw IOException("remote write: ${e.message}", e)
+            }
             if (n <= 0) break
             if (n < data.size) {
                 flow.outQueue[0] = data.copyOfRange(n, data.size)
@@ -380,50 +386,82 @@ class TunDataplane(
             }
         }
 
-        // Read remote -> client
+        // ACK client progress if needed (critical for Telegram / browsers)
+        if (flow.needAck) {
+            sendTcp(
+                flow,
+                seq = flow.serverNextSeq,
+                ack = flow.clientNextSeq,
+                flags = 0x10, // ACK
+                payload = ByteArray(0),
+            )
+            flow.needAck = false
+        }
+
+        // remote -> client
         buf.clear()
         val n = try {
             ch.read(buf)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             -1
         }
-        if (n > 0) {
-            buf.flip()
-            val data = ByteArray(buf.remaining())
-            buf.get(data)
-            val pkt = buildTcpPacket(
-                src = flow.remotePresentedAddr.address,
-                dst = flow.clientAddr.address,
-                srcPort = flow.remotePort,
-                dstPort = flow.clientPort,
-                seq = flow.serverSeq,
-                ack = flow.clientSeq,
-                flags = 0x18, // PSH+ACK
-                payload = data,
-            )
-            if (pkt != null) writePacket(pkt)
-            flow.serverSeq += data.size
-        } else if (n < 0) {
-            // remote closed
-            val fin = buildTcpPacket(
-                src = flow.remotePresentedAddr.address,
-                dst = flow.clientAddr.address,
-                srcPort = flow.remotePort,
-                dstPort = flow.clientPort,
-                seq = flow.serverSeq,
-                ack = flow.clientSeq,
-                flags = 0x11, // FIN+ACK
-                payload = ByteArray(0),
-            )
-            if (fin != null) writePacket(fin)
-            flow.close()
-            tcpFlows.remove(flow.key)
-            bumpFlows(-1)
+        when {
+            n > 0 -> {
+                buf.flip()
+                val data = ByteArray(buf.remaining())
+                buf.get(data)
+                sendTcp(
+                    flow,
+                    seq = flow.serverNextSeq,
+                    ack = flow.clientNextSeq,
+                    flags = 0x18, // PSH+ACK
+                    payload = data,
+                )
+                flow.serverNextSeq += data.size
+                flow.lastActivityMs = System.currentTimeMillis()
+            }
+            n < 0 -> {
+                // remote closed
+                sendTcp(
+                    flow,
+                    seq = flow.serverNextSeq,
+                    ack = flow.clientNextSeq,
+                    flags = 0x11, // FIN+ACK
+                    payload = ByteArray(0),
+                )
+                flow.serverNextSeq += 1
+                flow.close()
+                if (tcpFlows.remove(flow.key) != null) bumpFlows(-1)
+                return
+            }
         }
 
         if (flow.clientFin && flow.outQueue.isEmpty()) {
             runCatching { ch.shutdownOutput() }
         }
+    }
+
+    private fun sendTcp(
+        flow: TcpFlow,
+        seq: Int,
+        ack: Int,
+        flags: Int,
+        payload: ByteArray,
+    ) {
+        val src = flow.remotePresentedAddr.address
+        val dst = flow.clientAddr.address
+        if (src.size != 4 || dst.size != 4) return
+        val pkt = buildTcpPacket(
+            src = src,
+            dst = dst,
+            srcPort = flow.remotePort,
+            dstPort = flow.clientPort,
+            seq = seq,
+            ack = ack,
+            flags = flags,
+            payload = payload,
+        ) ?: return
+        writePacket(pkt)
     }
 
     private fun udpPumpLoop() {
@@ -441,24 +479,24 @@ class TunDataplane(
                             val src = flow.remoteAddr.address
                             val dst = flow.clientAddr.address
                             if (src.size == 4 && dst.size == 4) {
-                                val pkt = PacketBuilder.ipv4Udp(
-                                    src = src,
-                                    dst = dst,
-                                    srcPort = flow.remotePort,
-                                    dstPort = flow.clientPort,
-                                    payload = data,
+                                writePacket(
+                                    PacketBuilder.ipv4Udp(
+                                        src = src,
+                                        dst = dst,
+                                        srcPort = flow.remotePort,
+                                        dstPort = flow.clientPort,
+                                        payload = data,
+                                    ),
                                 )
-                                writePacket(pkt)
                             }
                             flow.lastActivityMs = System.currentTimeMillis()
                         }
                     } catch (_: Exception) {
                         flow.close()
-                        udpFlows.remove(flow.key)
-                        bumpFlows(-1)
+                        if (udpFlows.remove(flow.key) != null) bumpFlows(-1)
                     }
                 }
-                Thread.sleep(2)
+                Thread.sleep(1)
             } catch (_: InterruptedException) {
                 break
             }
@@ -470,18 +508,22 @@ class TunDataplane(
             try {
                 val now = System.currentTimeMillis()
                 tcpFlows.entries.removeIf { (_, f) ->
-                    if (now - f.lastActivityMs > 120_000) {
+                    if (now - f.lastActivityMs > TCP_IDLE_MS) {
                         f.close()
                         bumpFlows(-1)
                         true
-                    } else false
+                    } else {
+                        false
+                    }
                 }
                 udpFlows.entries.removeIf { (_, f) ->
-                    if (now - f.lastActivityMs > 60_000) {
+                    if (now - f.lastActivityMs > UDP_IDLE_MS) {
                         f.close()
                         bumpFlows(-1)
                         true
-                    } else false
+                    } else {
+                        false
+                    }
                 }
                 Thread.sleep(5_000)
             } catch (_: InterruptedException) {
@@ -490,11 +532,19 @@ class TunDataplane(
         }
     }
 
-    private fun bumpFlows(delta: Int = 1) {
-        val v = if (delta > 0) activeFlows.incrementAndGet()
-        else activeFlows.updateAndGet { (it + delta).coerceAtLeast(0) }
+    private fun bumpFlows(delta: Int) {
+        val v = activeFlows.updateAndGet { cur -> (cur + delta).coerceAtLeast(0) }
         onFlowCountChanged?.invoke(v)
     }
+
+    private fun readInt(b: ByteArray, off: Int): Int =
+        ((b[off].toInt() and 0xFF) shl 24) or
+            ((b[off + 1].toInt() and 0xFF) shl 16) or
+            ((b[off + 2].toInt() and 0xFF) shl 8) or
+            (b[off + 3].toInt() and 0xFF)
+
+    /** RFC 1982 serial number comparison for 32-bit TCP sequence numbers. */
+    private fun seqLess(a: Int, b: Int): Boolean = (a - b) < 0
 
     private fun buildTcpPacket(
         src: ByteArray,
@@ -506,7 +556,7 @@ class TunDataplane(
         flags: Int,
         payload: ByteArray,
     ): ByteArray? {
-        if (src.size != 4 || dst.size != 4) return null // IPv6 TCP craft simplified: skip in MVP write path
+        if (src.size != 4 || dst.size != 4) return null
         val tcpLen = 20 + payload.size
         val total = 20 + tcpLen
         val arr = ByteArray(total)
@@ -514,8 +564,8 @@ class TunDataplane(
         buf.put(0x45.toByte())
         buf.put(0)
         buf.putShort(total.toShort())
-        buf.putShort((System.nanoTime() and 0xFFFF).toShort())
-        buf.putShort(0x4000.toShort())
+        buf.putShort((System.nanoTime() and 0xFFFF).toInt().toShort())
+        buf.putShort(0x4000.toShort()) // DF
         buf.put(64)
         buf.put(IpPacketParser.PROTO_TCP.toByte())
         buf.putShort(0)
@@ -544,17 +594,15 @@ class TunDataplane(
         arr[10] = (ipcs ushr 8).toByte()
         arr[11] = (ipcs and 0xFF).toByte()
 
-        // TCP checksum
+        // TCP checksum with pseudo-header
         sum = 0L
-        fun add(b: ByteArray) {
-            var j = 0
-            while (j + 1 < b.size) {
-                sum += ((b[j].toInt() and 0xFF) shl 8) or (b[j + 1].toInt() and 0xFF)
-                j += 2
-            }
-            if (j < b.size) sum += (b[j].toInt() and 0xFF) shl 8
+        fun add16(hi: Int, lo: Int) {
+            sum += ((hi and 0xFF) shl 8) or (lo and 0xFF)
         }
-        add(src); add(dst)
+        for (j in 0 until 4 step 2) {
+            add16(src[j].toInt(), src[j + 1].toInt())
+            add16(dst[j].toInt(), dst[j + 1].toInt())
+        }
         sum += IpPacketParser.PROTO_TCP
         sum += tcpLen
         i = 20
@@ -583,11 +631,13 @@ class TunDataplane(
         val remotePort: Int,
         var clientIsn: Int,
         val serverIsn: Int = (System.nanoTime() and 0x7FFFFFFF).toInt(),
-        var serverSeq: Int = 0,
-        var clientSeq: Int = 0,
+        var clientNextSeq: Int = 0,
+        var serverNextSeq: Int = 0,
         var connected: Boolean = false,
-        var pendingClientSyn: Boolean = false,
+        var established: Boolean = false,
+        var pendingClientSyn: Boolean = true,
         var clientFin: Boolean = false,
+        var needAck: Boolean = false,
         val createdAt: Long = System.currentTimeMillis(),
         var lastActivityMs: Long = System.currentTimeMillis(),
         val outQueue: MutableList<ByteArray> = mutableListOf(),

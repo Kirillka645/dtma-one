@@ -22,7 +22,7 @@ class ProtectedDnsClient(
 ) {
     data class Answer(val addresses: List<InetAddress>)
 
-    fun resolve(hostname: String, timeoutMs: Int = 3000): Answer {
+    fun resolve(hostname: String, timeoutMs: Int = 1500): Answer {
         val host = hostname.trim().lowercase().substringBefore('/').substringBefore('?')
         if (host.isEmpty()) return Answer(emptyList())
 

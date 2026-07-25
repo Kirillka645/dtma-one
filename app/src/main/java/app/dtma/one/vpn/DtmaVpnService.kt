@@ -54,6 +54,9 @@ class DtmaVpnService : VpnService() {
 
         try {
             val networkContext = NetworkContextFactory.current(this)
+            // IPv4-only VPN path for MVP.
+            // Claiming IPv6 (::/0) without a working IPv6 userspace stack black-holes apps
+            // that prefer AAAA (Telegram often does). Leave IPv6 on the physical network.
             val builder = Builder()
                 .setSession("DTMA One")
                 .setMtu(1500)
@@ -61,23 +64,23 @@ class DtmaVpnService : VpnService() {
                 .addDnsServer("10.0.0.1")
                 .addRoute("0.0.0.0", 0)
 
-            // IPv6 optional: enable dual-stack when device has IPv6.
-            var ipv6Enabled = false
-            if (networkContext.hasIpv6) {
-                try {
-                    builder.addAddress("fd00:646d:7461:1::2", 128)
-                    builder.addRoute("::", 0)
-                    ipv6Enabled = true
-                } catch (e: Exception) {
-                    Log.w(TAG, "IPv6 TUN not added: ${e.message}")
-                }
-            }
+            val ipv6Enabled = false
 
-            // Exclude our own sockets via protect(); also disallow bypass when possible.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
             }
+            // Blocking TUN fd: reader thread blocks until packets arrive.
             builder.setBlocking(true)
+
+            // Do not allow apps to bypass VPN when the platform supports it.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    // Prefer all apps through VPN; no per-app disallow list in MVP.
+                    builder.addDisallowedApplication(packageName)
+                } catch (e: Exception) {
+                    Log.w(TAG, "addDisallowedApplication self: ${e.message}")
+                }
+            }
 
             val pfd = builder.establish()
             if (pfd == null) {
@@ -128,7 +131,7 @@ class DtmaVpnService : VpnService() {
             VpnStateHolder.set(
                 VpnRuntimeStatus(
                     state = if (ipv6Enabled) VpnUiState.ACTIVE else VpnUiState.ACTIVE,
-                    message = "Local dataplane running (TCP/UDP/DNS). No remote server.",
+                    message = "Local dataplane: IPv4 TCP/UDP/DNS + protect(). IPv6 not captured (avoids black-hole).",
                     flowCount = 0,
                     networkContext = networkContext,
                     ipv4 = true,
