@@ -60,7 +60,8 @@ class DtmaVpnService : VpnService() {
             val builder = Builder()
                 .setSession("DTMA One")
                 .setMtu(1500)
-                .addAddress("10.0.0.2", 32)
+                // /24 so 10.0.0.1 (VPN DNS) is on-link with our TUN address.
+                .addAddress("10.0.0.2", 24)
                 .addDnsServer("10.0.0.1")
                 .addRoute("0.0.0.0", 0)
 
