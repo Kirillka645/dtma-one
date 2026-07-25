@@ -2,6 +2,7 @@ package app.dtma.one.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.NetworkCheck
@@ -21,6 +22,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.dtma.one.R
 import app.dtma.one.ui.about.AboutScreen
+import app.dtma.one.ui.bypass.FullBypassScreen
 import app.dtma.one.ui.home.HomeScreen
 import app.dtma.one.ui.settings.SettingsScreen
 import app.dtma.one.ui.test.ConnectionTestScreen
@@ -39,6 +41,12 @@ fun DtmaAppRoot(onToggleVpn: (Boolean) -> Unit) {
                     onClick = { nav.navigate("home") { launchSingleTop = true } },
                     icon = { Icon(Icons.Default.Home, contentDescription = null) },
                     label = { Text(stringResource(R.string.nav_home)) },
+                )
+                NavigationBarItem(
+                    selected = route == "bypass",
+                    onClick = { nav.navigate("bypass") { launchSingleTop = true } },
+                    icon = { Icon(Icons.Default.Bolt, contentDescription = null) },
+                    label = { Text(stringResource(R.string.nav_bypass)) },
                 )
                 NavigationBarItem(
                     selected = route == "test",
@@ -66,7 +74,13 @@ fun DtmaAppRoot(onToggleVpn: (Boolean) -> Unit) {
             startDestination = "home",
             modifier = Modifier.padding(innerPadding),
         ) {
-            composable("home") { HomeScreen(onToggleVpn = onToggleVpn) }
+            composable("home") {
+                HomeScreen(
+                    onToggleVpn = onToggleVpn,
+                    onOpenBypass = { nav.navigate("bypass") { launchSingleTop = true } },
+                )
+            }
+            composable("bypass") { FullBypassScreen() }
             composable("test") { ConnectionTestScreen() }
             composable("settings") { SettingsScreen() }
             composable("about") { AboutScreen() }

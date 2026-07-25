@@ -37,7 +37,10 @@ import app.dtma.one.vpn.VpnStateHolder
 import kotlinx.coroutines.launch
 
 @Composable
-fun HomeScreen(onToggleVpn: (Boolean) -> Unit) {
+fun HomeScreen(
+    onToggleVpn: (Boolean) -> Unit,
+    onOpenBypass: () -> Unit = {},
+) {
     val status by VpnStateHolder.status.collectAsStateWithLifecycle()
     val updateState by UpdateNotifier.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -75,23 +78,25 @@ fun HomeScreen(onToggleVpn: (Boolean) -> Unit) {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                containerColor = MaterialTheme.colorScheme.errorContainer,
             ),
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Если не работают TG / YouTube", style = MaterialTheme.typography.titleSmall)
+                Text("TG + YouTube мертвы у провайдера?", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "1. Настройки → «Включить весь локальный обход»\n" +
-                        "2. VPN выкл → вкл, Wi‑Fi + LTE\n" +
-                        "3. YouTube: DoH (подмена DNS)\n" +
-                        "4. Telegram: smart path; если probe ~0 — MTProto\n" +
-                        "5. Оба мертвы на IP → Cloudflare WARP / свой прокси " +
-                        "(локальный VPN не создаёт маршруты к заблокированным IP)",
+                    "Локальный DTMA не создаст маршрут. Нужен free WARP (Cloudflare) " +
+                        "через WireGuard — вкладка «Чтобы работало».",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Button(
+                    onClick = onOpenBypass,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Сделать чтобы работало (WARP)")
+                }
             }
         }
 

@@ -13,8 +13,8 @@ android {
         applicationId = "app.dtma.one"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.2.7"
+        versionCode = 12
+        versionName = "0.2.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GIT_SHA", "\"dev\"")
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/Kirillka645/dtma-one\"")
@@ -97,6 +97,8 @@ dependencies {
     implementation("androidx.compose.runtime:runtime")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // X25519 keys for Cloudflare WARP (WireGuard) config generator
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 
@@ -104,3 +106,4 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation(project(":core:model"))
 }
+
