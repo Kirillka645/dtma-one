@@ -8,16 +8,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
 
 /**
- * Diagnoses whether common Telegram DC endpoints are reachable from this device.
- * Same ISP path as local VPN egress (no remote proxy) — if these fail, Telegram
- * cannot work through DTMA One either.
+ * Probes known Telegram infrastructure endpoints on standard ports.
+ * Same ISP egress as local VPN — if all fail, local-only mode cannot reach Telegram.
  */
 object TelegramDcProbe {
 
-    data class Target(val host: String, val port: Int = 443, val label: String)
+    data class Target(val host: String, val port: Int, val label: String)
 
     data class Result(
         val target: Target,
@@ -26,21 +24,34 @@ object TelegramDcProbe {
         val error: String?,
     )
 
-    /** Public Telegram DC / edge endpoints commonly used by clients. */
-    val DEFAULT_TARGETS: List<Target> = listOf(
-        Target("149.154.167.50", 443, "DC2-IPv4"),
-        Target("149.154.167.51", 443, "DC2b-IPv4"),
-        Target("149.154.175.50", 443, "DC4-IPv4"),
-        Target("149.154.175.100", 443, "DC4b-IPv4"),
-        Target("91.108.56.100", 443, "DC5-IPv4"),
-        Target("91.108.56.116", 443, "DC5b-IPv4"),
-        Target("2001:67c:4e8:f004::9", 443, "DC2-IPv6"),
-        Target("2001:b28:f23d:f001::a", 443, "DC4-IPv6"),
+    private val hosts = listOf(
+        "149.154.167.50" to "DC2",
+        "149.154.167.51" to "DC2b",
+        "149.154.175.50" to "DC4",
+        "149.154.175.100" to "DC4b",
+        "91.108.56.100" to "DC5",
+        "91.108.56.116" to "DC5b",
+        "149.154.167.91" to "DC2c",
+        "91.108.4.136" to "DC1",
     )
+
+    /** Officially used Telegram client ports. */
+    private val ports = listOf(443, 80, 5222)
+
+    val DEFAULT_TARGETS: List<Target> = buildList {
+        for ((ip, name) in hosts) {
+            for (p in ports) {
+                add(Target(ip, p, "$name:$p"))
+            }
+        }
+        // IPv6 samples
+        add(Target("2001:67c:4e8:f004::9", 443, "DC2-v6:443"))
+        add(Target("2001:b28:f23d:f001::a", 443, "DC4-v6:443"))
+    }
 
     suspend fun probeAll(
         targets: List<Target> = DEFAULT_TARGETS,
-        timeoutMs: Int = 4000,
+        timeoutMs: Int = 3500,
     ): List<Result> = coroutineScope {
         targets.map { t ->
             async(Dispatchers.IO) { probeOne(t, timeoutMs) }
@@ -48,29 +59,31 @@ object TelegramDcProbe {
     }
 
     fun summarize(results: List<Result>): String {
-        val ok = results.count { it.ok }
+        val ok = results.filter { it.ok }
         val sb = StringBuilder()
-        sb.append("Telegram DC probe: $ok/${results.size} reachable\n")
+        sb.append("Telegram DC probe: ${ok.size}/${results.size} reachable\n\n")
         results.forEach { r ->
             sb.append(
-                if (r.ok) "✓ ${r.target.label} ${r.target.host}:${r.target.port} ${r.ms}ms\n"
-                else "✗ ${r.target.label} ${r.target.host}:${r.target.port} — ${r.error}\n",
+                if (r.ok) "✓ ${r.target.label} ${r.target.host} ${r.ms}ms\n"
+                else "✗ ${r.target.label} ${r.target.host} — ${r.error}\n",
             )
         }
-        if (ok == 0) {
+        sb.append('\n')
+        if (ok.isEmpty()) {
             sb.append(
-                "\nВсе DC недоступны с этого IP/провайдера. " +
-                    "Локальный VPN DTMA One выходит в интернет ТЕМ ЖЕ каналом — " +
-                    "он не разблокирует null-route Telegram. " +
-                    "Нужен другой маршрут (внешний прокси/VPN), чего DTMA One намеренно не делает.\n",
-            )
-        } else if (ok < results.size) {
-            sb.append(
-                "\nЧасть DC доступна. Если TG всё равно висит — перезапустите TG, " +
-                    "проверьте что VPN 0.2.1+ активен, или смените сеть.\n",
+                "ВЫВОД: ни один DC Telegram не отвечает с этой сети (timeout/unreachable).\n\n" +
+                    "Локальный VPN DTMA One выходит через ТОГО ЖЕ провайдера и " +
+                    "НЕ МОЖЕТ открыть null-route / полную блокировку адресного пространства.\n\n" +
+                    "Что реально работает:\n" +
+                    "1) Внешний SOCKS5/VPN/MTProto, который УЖЕ видит DC (свой или купленный) — " +
+                    "укажите в Настройках «Upstream SOCKS5».\n" +
+                    "2) Официальный MTProto proxy в настройках самого Telegram.\n" +
+                    "3) Другая сеть (мобильный интернет / Wi‑Fi), где probe > 0.\n\n" +
+                    "Это не баг dataplane: example.com ходит, DC Telegram — нет.",
             )
         } else {
-            sb.append("\nDC отвечают. Если TG висит — проблема в клиенте/сессии, не в маршруте.\n")
+            sb.append("Доступны: ${ok.joinToString { it.target.label }}.\n")
+            sb.append("Если TG всё равно висит — перезапустите Telegram при включённом DTMA 0.2.1+.\n")
         }
         return sb.toString()
     }
@@ -79,14 +92,20 @@ object TelegramDcProbe {
         val t0 = System.currentTimeMillis()
         return try {
             Socket().use { s ->
-                s.soTimeout = timeoutMs
                 s.connect(InetSocketAddress(target.host, target.port), timeoutMs)
                 Result(target, true, System.currentTimeMillis() - t0, null)
             }
         } catch (_: SocketTimeoutException) {
             Result(target, false, System.currentTimeMillis() - t0, "timeout")
         } catch (e: IOException) {
-            Result(target, false, System.currentTimeMillis() - t0, e.message ?: "io")
+            val msg = e.message ?: "io"
+            val short = when {
+                msg.contains("ENETUNREACH", true) -> "ENETUNREACH"
+                msg.contains("ECONNREFUSED", true) -> "refused"
+                msg.contains("EHOSTUNREACH", true) -> "host unreachable"
+                else -> msg.take(40)
+            }
+            Result(target, false, System.currentTimeMillis() - t0, short)
         } catch (e: Exception) {
             Result(target, false, System.currentTimeMillis() - t0, e.message ?: "error")
         }

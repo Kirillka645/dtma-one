@@ -1,7 +1,6 @@
 package app.dtma.one.core.storage
 
 import android.content.Context
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -25,6 +24,10 @@ data class UserSettings(
     val localLogsEnabled: Boolean = false,
     val rememberTestUrl: Boolean = false,
     val lastTestUrl: String = "https://example.com/",
+    /** User-provided SOCKS5 (not DTMA infrastructure). Empty = local protect SOCKS5. */
+    val upstreamSocksHost: String = "",
+    val upstreamSocksPort: Int = 1080,
+    val upstreamSocksEnabled: Boolean = false,
 ) {
     fun toRaceConfig(): RaceConfig = RaceConfig(
         width = raceWidth,
@@ -33,6 +36,9 @@ data class UserSettings(
         batterySaver = batterySaver,
         halfLifeHours = rvecHalfLifeHours,
     )
+
+    fun hasUpstreamSocks(): Boolean =
+        upstreamSocksEnabled && upstreamSocksHost.isNotBlank() && upstreamSocksPort in 1..65535
 }
 
 class SettingsRepository(private val context: Context) {
@@ -45,6 +51,9 @@ class SettingsRepository(private val context: Context) {
         val localLogs = booleanPreferencesKey("local_logs")
         val rememberUrl = booleanPreferencesKey("remember_url")
         val lastUrl = stringPreferencesKey("last_url")
+        val upSocksHost = stringPreferencesKey("up_socks_host")
+        val upSocksPort = intPreferencesKey("up_socks_port")
+        val upSocksEn = booleanPreferencesKey("up_socks_en")
     }
 
     val settings: Flow<UserSettings> = context.dataStore.data.map { p ->
@@ -58,6 +67,9 @@ class SettingsRepository(private val context: Context) {
             localLogsEnabled = p[Keys.localLogs] ?: false,
             rememberTestUrl = p[Keys.rememberUrl] ?: false,
             lastTestUrl = p[Keys.lastUrl] ?: "https://example.com/",
+            upstreamSocksHost = p[Keys.upSocksHost].orEmpty(),
+            upstreamSocksPort = p[Keys.upSocksPort] ?: 1080,
+            upstreamSocksEnabled = p[Keys.upSocksEn] ?: false,
         )
     }
 
@@ -73,6 +85,9 @@ class SettingsRepository(private val context: Context) {
                 localLogsEnabled = prefs[Keys.localLogs] ?: false,
                 rememberTestUrl = prefs[Keys.rememberUrl] ?: false,
                 lastTestUrl = prefs[Keys.lastUrl] ?: "https://example.com/",
+                upstreamSocksHost = prefs[Keys.upSocksHost].orEmpty(),
+                upstreamSocksPort = prefs[Keys.upSocksPort] ?: 1080,
+                upstreamSocksEnabled = prefs[Keys.upSocksEn] ?: false,
             )
             val next = transform(current)
             prefs[Keys.raceWidth] = next.raceWidth.coerceIn(1, 3)
@@ -83,6 +98,9 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.localLogs] = next.localLogsEnabled
             prefs[Keys.rememberUrl] = next.rememberTestUrl
             prefs[Keys.lastUrl] = if (next.rememberTestUrl) next.lastTestUrl else ""
+            prefs[Keys.upSocksHost] = next.upstreamSocksHost.trim()
+            prefs[Keys.upSocksPort] = next.upstreamSocksPort.coerceIn(1, 65535)
+            prefs[Keys.upSocksEn] = next.upstreamSocksEnabled
         }
     }
 }

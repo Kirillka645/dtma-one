@@ -13,15 +13,18 @@ import app.dtma.one.MainActivity
 import app.dtma.one.R
 import app.dtma.one.core.model.VpnUiState
 import app.dtma.one.core.network.NetworkContextFactory
+import app.dtma.one.core.storage.UserSettings
 import java.io.File
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 
 /**
- * Local-only VpnService using:
- * 1) TUN from [Builder.establish]
- * 2) hev-socks5-tunnel (lwIP userspace stack) as tun2socks
- * 3) [LocalSocks5Server] with [protect] for real outbound sockets
+ * Local VpnService: hev-socks5-tunnel (lwIP) + egress SOCKS5.
  *
- * No remote VPN/proxy infrastructure of the project authors.
+ * Egress modes:
+ * 1) Default — local SOCKS5 with [protect] (same ISP, no remote infra).
+ * 2) Optional user-provided upstream SOCKS5 (YOUR proxy — not DTMA servers).
+ *    Use this when probe shows Telegram DCs blocked on the ISP path.
  */
 class DtmaVpnService : VpnService() {
 
@@ -55,25 +58,40 @@ class DtmaVpnService : VpnService() {
                 )
             }
 
+            val settings: UserSettings = runBlocking {
+                DtmaApp.instance.settingsRepository.settings.first()
+            }
             val networkContext = NetworkContextFactory.current(this)
 
-            // Local SOCKS5 first (outbound with protect / app-disallow).
-            val socks = LocalSocks5Server(this, bindPort = 18080)
-            socks.start()
-            socks5 = socks
-            val socksPort = socks.listenPort
+            val socksHost: String
+            val socksPort: Int
+            val modeLabel: String
+
+            if (settings.hasUpstreamSocks()) {
+                // User-provided remote SOCKS5 (e.g. VPS that can reach Telegram DCs).
+                socks5?.stop()
+                socks5 = null
+                socksHost = settings.upstreamSocksHost.trim()
+                socksPort = settings.upstreamSocksPort
+                modeLabel = "Upstream SOCKS5 $socksHost:$socksPort (ваш прокси)"
+                Log.i(TAG, "Using user upstream SOCKS5 $socksHost:$socksPort")
+            } else {
+                val socks = LocalSocks5Server(this, bindPort = 18080)
+                socks.start()
+                socks5 = socks
+                socksHost = "127.0.0.1"
+                socksPort = socks.listenPort
+                modeLabel = "Local SOCKS5 (тот же ISP; blocked DC не откроет)"
+            }
 
             val builder = Builder()
                 .setSession("DTMA One")
-                // Slightly lower MTU reduces blackhole issues on mobile.
                 .setMtu(1400)
                 .addAddress("10.0.0.2", 30)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .addRoute("0.0.0.0", 0)
 
-            // Dual-stack: Telegram often prefers IPv6; without ::/0 those packets
-            // bypass VPN and can hang on a broken v6 path while "internet" still works.
             var ipv6 = false
             try {
                 builder.addAddress("fd00:646d:7461::2", 64)
@@ -86,12 +104,12 @@ class DtmaVpnService : VpnService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
             }
-            // Exclude ourselves so SOCKS5 + hev control sockets never re-enter TUN.
             try {
                 builder.addDisallowedApplication(packageName)
             } catch (e: Exception) {
                 Log.w(TAG, "disallow self: ${e.message}")
             }
+            // If user SOCKS is a local IP on LAN, also fine (disallowed app reaches it).
 
             val pfd = builder.establish()
             if (pfd == null) {
@@ -101,7 +119,7 @@ class DtmaVpnService : VpnService() {
                         message = "VPN permission missing or establish() failed",
                     )
                 }
-                socks.stop()
+                socks5?.stop()
                 socks5 = null
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -109,28 +127,23 @@ class DtmaVpnService : VpnService() {
             }
             tun = pfd
 
-            val configFile = writeHevConfig(socksPort, ipv6)
-            val fd = pfd.fd
-            Log.i(TAG, "Starting hev tun2socks fd=$fd socks=127.0.0.1:$socksPort ipv6=$ipv6")
-
-            // JNI returns after spawning hev worker thread.
-            HevTunnel.TProxyStartService(configFile.absolutePath, fd)
+            val configFile = writeHevConfig(socksHost, socksPort, ipv6)
+            Log.i(TAG, "hev start fd=${pfd.fd} socks=$socksHost:$socksPort ipv6=$ipv6")
+            HevTunnel.TProxyStartService(configFile.absolutePath, pfd.fd)
             hevRunning = true
 
             VpnStateHolder.set(
                 VpnRuntimeStatus(
                     state = VpnUiState.ACTIVE,
-                    message = "Local tun2socks (hev+SOCKS5). Same ISP path — " +
-                        "blocked Telegram DCs stay blocked. IPv4" +
-                        if (ipv6) "+IPv6." else ".",
+                    message = modeLabel,
                     flowCount = 0,
                     networkContext = networkContext,
                     ipv4 = true,
                     ipv6 = ipv6,
-                    limitedMode = false,
+                    limitedMode = !settings.hasUpstreamSocks(),
                 ),
             )
-            Log.i(TAG, "VPN started (hev)")
+            Log.i(TAG, "VPN started")
         } catch (e: Exception) {
             Log.e(TAG, "start failed", e)
             VpnStateHolder.update {
@@ -140,9 +153,8 @@ class DtmaVpnService : VpnService() {
         }
     }
 
-    private fun writeHevConfig(socksPort: Int, ipv6: Boolean): File {
+    private fun writeHevConfig(socksHost: String, socksPort: Int, ipv6: Boolean): File {
         val f = File(filesDir, "hev-config.yml")
-        // Long TCP timeouts: Telegram keeps idle push connections open.
         val yaml = buildString {
             appendLine("tunnel:")
             appendLine("  mtu: 1400")
@@ -151,7 +163,7 @@ class DtmaVpnService : VpnService() {
             if (ipv6) appendLine("  ipv6: 'fd00:646d:7461::2'")
             appendLine("socks5:")
             appendLine("  port: $socksPort")
-            appendLine("  address: 127.0.0.1")
+            appendLine("  address: $socksHost")
             appendLine("  udp: 'udp'")
             appendLine("misc:")
             appendLine("  log-level: warn")
