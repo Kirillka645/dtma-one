@@ -55,3 +55,15 @@ Package id (debug): `app.dtma.one.debug`
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## CI note
+
+GitHub Actions workflow sources live in [docs/ci/](docs/ci/) because the initial publish token lacked the `workflow` scope.
+To enable Actions, copy them to `.github/workflows/` after:
+
+```bash
+gh auth refresh -s workflow,repo
+cp docs/ci/*.yml .github/workflows/
+git add .github/workflows && git commit -m "ci: enable GitHub Actions" && git push
+```
+
