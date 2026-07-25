@@ -72,6 +72,29 @@ fun HomeScreen(onToggleVpn: (Boolean) -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+            ),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("Если не работают TG / YouTube", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "1. Настройки → «Включить весь локальный обход»\n" +
+                        "2. VPN выкл → вкл, Wi‑Fi + LTE\n" +
+                        "3. YouTube: DoH (подмена DNS)\n" +
+                        "4. Telegram: smart path; если probe ~0 — MTProto\n" +
+                        "5. Оба мертвы на IP → Cloudflare WARP / свой прокси " +
+                        "(локальный VPN не создаёт маршруты к заблокированным IP)",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+
         if (updateState is UpdateCheckState.Available) {
             val update = (updateState as UpdateCheckState.Available).update
             Card(

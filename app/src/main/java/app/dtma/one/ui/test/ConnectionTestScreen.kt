@@ -164,6 +164,51 @@ fun ConnectionTestScreen() {
         ) {
             Text("Проверить DC Telegram (диагностика)")
         }
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    running = true
+                    events = emptyList()
+                    summary = "DoH / YouTube диагностика…"
+                    try {
+                        val hosts = listOf(
+                            "youtube.com",
+                            "www.youtube.com",
+                            "googlevideo.com",
+                            "google.com",
+                        )
+                        val lines = mutableListOf<String>()
+                        for (h in hosts) {
+                            val addrs = kotlinx.coroutines.withContext(
+                                kotlinx.coroutines.Dispatchers.IO,
+                            ) {
+                                app.dtma.one.vpn.DohResolver.bind(null)
+                                app.dtma.one.vpn.DohResolver.resolveHost(h)
+                            }
+                            val msg = if (addrs.isEmpty()) {
+                                "✗ $h — DoH не ответил (HTTPS к DoH закрыт?)"
+                            } else {
+                                "✓ $h → ${addrs.take(3).joinToString { it.hostAddress ?: "?" }}"
+                            }
+                            lines += msg
+                            events = events + msg
+                        }
+                        lines += ""
+                        lines += "Если DoH ✓, а YouTube в приложении нет — блок IP/SNI, не DNS."
+                        lines += "Нужен внешний путь (WARP / прокси), не только DTMA."
+                        summary = lines.joinToString("\n")
+                    } catch (e: Exception) {
+                        summary = "DoH probe error: ${e.message}"
+                    } finally {
+                        running = false
+                    }
+                }
+            },
+            enabled = !running,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Проверить YouTube DNS (DoH)")
+        }
         Text(
             "Локальный VPN выходит через того же провайдера. " +
                 "Если все DC Telegram недоступны — DTMA One их не «откроет».",

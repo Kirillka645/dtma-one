@@ -113,17 +113,46 @@ fun SettingsScreen() {
             },
         )
 
-        Text("Обход блокировок Telegram (без SOCKS5)", style = MaterialTheme.typography.titleMedium)
+        Text("Обход без своего SOCKS5", style = MaterialTheme.typography.titleMedium)
         Text(
-            "1) Multipath: если Wi‑Fi режет DC, а мобильный интернет — нет, " +
-                "DTMA шлёт только Telegram через вторую сеть (Wi‑Fi+LTE одновременно). " +
-                "Сервер не нужен.\n" +
-                "2) MTProto: встроенный прокси Telegram (не SOCKS5) — откройте ссылку ниже.\n" +
-                "3) Если probe 0/N на ВСЕХ сетях (Wi‑Fi и LTE) — без внешнего пути " +
-                "(свой MTProto/VPS/другая сеть) не обойти. Локальная «магия» IP не создаёт.",
+            "YouTube часто ломает ПОДМЕНА DNS — чинит DoH.\n" +
+                "Telegram — блок IP DC; DoH не поможет, нужны smart path / multipath / MTProto.\n" +
+                "Если IP null-route на всех сетях — локально не обойти, нужен внешний путь " +
+                "(WARP/MTProto/VPS). DTMA сервер не поднимает.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        RowSwitch(
+            title = "DNS over HTTPS (YouTube / сайты)",
+            checked = settings.dohDns,
+            onChecked = { v ->
+                scope.launch {
+                    DtmaApp.instance.settingsRepository.update { it.copy(dohDns = v) }
+                }
+            },
+        )
+        Text(
+            "DNS-запросы в туннеле → Cloudflare/Google DoH по HTTPS. " +
+                "После смены: Выкл VPN → Вкл. Если YouTube всё равно нет — блок IP/SNI, нужен внешний VPN.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(
+            onClick = {
+                scope.launch {
+                    DtmaApp.instance.settingsRepository.update {
+                        it.copy(
+                            dohDns = true,
+                            telegramSmartPath = true,
+                            telegramMultipath = true,
+                        )
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Включить весь локальный обход (DoH+TG+LTE)")
+        }
         RowSwitch(
             title = "Telegram smart path (гонка портов)",
             checked = settings.telegramSmartPath,

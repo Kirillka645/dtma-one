@@ -36,9 +36,17 @@ class LocalSocks5Server(
      * Same host only — never swaps DC address.
      */
     private val telegramSmartPath: Boolean = true,
+    /**
+     * Intercept UDP/53 and answer via DNS-over-HTTPS (helps YouTube when ISP poisons DNS).
+     */
+    private val dohDns: Boolean = true,
 ) {
     companion object {
         private const val TAG = "DtmaSocks5"
+    }
+
+    init {
+        if (dohDns) DohResolver.bind(vpn)
     }
 
     private val running = AtomicBoolean(false)
@@ -302,6 +310,22 @@ class LocalSocks5Server(
                         val dport = ((data[p].toInt() and 0xFF) shl 8) or (data[p + 1].toInt() and 0xFF)
                         p += 2
                         val payload = data.copyOfRange(p, off + len)
+                        // DNS-over-HTTPS bypass for poisoned ISP resolvers (YouTube/Google often).
+                        if (dohDns && dport == 53 && payload.size >= 12) {
+                            val answered = try {
+                                DohResolver.resolveWire(payload)
+                            } catch (e: Exception) {
+                                Log.d(TAG, "DoH: ${e.message}")
+                                null
+                            }
+                            if (answered != null) {
+                                val c = clientEp[0] ?: continue
+                                val header = buildUdpHeader(destAddr, dport)
+                                val outBytes = header + answered
+                                relaySock.send(DatagramPacket(outBytes, outBytes.size, c))
+                                continue
+                            }
+                        }
                         relaySock.send(DatagramPacket(payload, payload.size, destAddr, dport))
                     } else {
                         val c = clientEp[0] ?: continue

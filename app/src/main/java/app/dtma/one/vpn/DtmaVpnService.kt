@@ -86,11 +86,13 @@ class DtmaVpnService : VpnService() {
             } else {
                 val multipath = settings.telegramMultipath
                 val smart = settings.telegramSmartPath
+                val doh = settings.dohDns
                 val socks = LocalSocks5Server(
                     vpn = this,
                     bindPort = 18080,
                     telegramMultipath = multipath,
                     telegramSmartPath = smart,
+                    dohDns = doh,
                 )
                 socks.start()
                 socks5 = socks
@@ -98,9 +100,10 @@ class DtmaVpnService : VpnService() {
                 socksPort = socks.listenPort
                 modeLabel = buildString {
                     append("Local")
-                    if (smart) append(" · TG smart path (port race)")
+                    if (doh) append(" · DoH DNS")
+                    if (smart) append(" · TG smart")
                     if (multipath) append(" · multipath")
-                    if (!smart && !multipath) append(" SOCKS5 · same ISP")
+                    if (!smart && !multipath && !doh) append(" SOCKS5 · same ISP")
                 }
                 if (smart) {
                     // Warm cache so first Telegram connect already prefers working ports.
@@ -122,15 +125,22 @@ class DtmaVpnService : VpnService() {
                 .addAddress("10.0.0.2", 30)
                 .addRoute("0.0.0.0", 0)
 
-            // Prefer underlying network DNS; fall back to public only if empty.
-            val dnsList = underlying.dnsServers.mapNotNull { it.hostAddress }.distinct()
-            if (dnsList.isNotEmpty()) {
-                dnsList.take(3).forEach { builder.addDnsServer(it) }
-                Log.i(TAG, "DNS from underlying: $dnsList")
-            } else {
+            // DoH mode: force public DNS IPs so queries hit the tunnel and LocalSocks5 intercepts :53 → DoH.
+            // (ISP resolver is often poisoned for YouTube; underlying DNS would re-poison.)
+            if (settings.dohDns && !settings.hasUpstreamSocks()) {
                 builder.addDnsServer("1.1.1.1")
                 builder.addDnsServer("8.8.8.8")
-                Log.w(TAG, "No underlying DNS; using 1.1.1.1/8.8.8.8 fallback")
+                Log.i(TAG, "DNS: 1.1.1.1/8.8.8.8 (DoH intercept in SOCKS UDP)")
+            } else {
+                val dnsList = underlying.dnsServers.mapNotNull { it.hostAddress }.distinct()
+                if (dnsList.isNotEmpty()) {
+                    dnsList.take(3).forEach { builder.addDnsServer(it) }
+                    Log.i(TAG, "DNS from underlying: $dnsList")
+                } else {
+                    builder.addDnsServer("1.1.1.1")
+                    builder.addDnsServer("8.8.8.8")
+                    Log.w(TAG, "No underlying DNS; using 1.1.1.1/8.8.8.8 fallback")
+                }
             }
 
             var ipv6 = false
