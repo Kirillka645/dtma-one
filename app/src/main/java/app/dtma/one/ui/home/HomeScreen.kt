@@ -24,6 +24,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dtma.one.R
+import app.dtma.one.bypass.WarpController
+import app.dtma.one.bypass.WarpMode
 import app.dtma.one.core.model.VpnUiState
 import app.dtma.one.ui.update.InAppUpdateCard
 import app.dtma.one.update.UpdateCheckState
@@ -37,6 +39,7 @@ fun HomeScreen(
 ) {
     val status by VpnStateHolder.status.collectAsStateWithLifecycle()
     val updateState by UpdateNotifier.state.collectAsStateWithLifecycle()
+    val warp by WarpController.status.collectAsStateWithLifecycle()
     val active = status.state == VpnUiState.ACTIVE ||
         status.state == VpnUiState.LIMITED ||
         status.state == VpnUiState.UNSTABLE ||
@@ -70,24 +73,40 @@ fun HomeScreen(
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
+                containerColor = when (warp.mode) {
+                    WarpMode.ON -> MaterialTheme.colorScheme.primaryContainer
+                    WarpMode.UNHEALTHY, WarpMode.ERROR -> MaterialTheme.colorScheme.errorContainer
+                    WarpMode.STARTING -> MaterialTheme.colorScheme.tertiaryContainer
+                    WarpMode.OFF -> MaterialTheme.colorScheme.errorContainer
+                },
             ),
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("TG + YouTube мертвы у провайдера?", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Локальный режим не создаст маршрут. В DTMA есть встроенный " +
-                        "Cloudflare WARP (без приложения WireGuard) — вкладка «Чтобы работало».",
+                    "WARP: ${warp.modeLabelRu()} · ${warp.trafficLine()}",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    warp.message.ifBlank {
+                        "Локальный режим не откроет TG/YT при null-route. WARP внутри DTMA."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Button(
                     onClick = onOpenBypass,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("WARP внутри DTMA")
+                    Text(
+                        when (warp.mode) {
+                            WarpMode.ON -> "WARP панель (ВКЛ)"
+                            WarpMode.UNHEALTHY -> "WARP больной — открыть"
+                            WarpMode.STARTING -> "WARP запускается…"
+                            else -> "WARP внутри DTMA"
+                        },
+                    )
                 }
             }
         }

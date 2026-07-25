@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -18,6 +19,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -25,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -33,7 +36,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dtma.one.R
 import app.dtma.one.bypass.WarpController
 import app.dtma.one.bypass.WarpInstaller
-import app.dtma.one.core.model.VpnUiState
+import app.dtma.one.bypass.WarpMode
 import app.dtma.one.vpn.VpnStateHolder
 import kotlinx.coroutines.launch
 
@@ -41,31 +44,31 @@ import kotlinx.coroutines.launch
 fun FullBypassScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var status by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    val vpnStatus by VpnStateHolder.status.collectAsStateWithLifecycle()
-    val warpOn = WarpController.isRunning
-
     var pendingStart by remember { mutableStateOf(false) }
+    var autoReconnect by remember { mutableStateOf(WarpController.autoReconnect) }
 
-    fun doStartWarp() {
+    val warp by WarpController.status.collectAsStateWithLifecycle()
+    val vpnStatus by VpnStateHolder.status.collectAsStateWithLifecycle()
+
+    fun doStart(forceNew: Boolean) {
         busy = true
-        status = "Запуск WARP + проверка handshake…"
+        note = if (forceNew) {
+            "Новый аккаунт + авто-retry до 3 раз…"
+        } else {
+            "Запуск WARP (при сбое conf перегенерируется сам)…"
+        }
         scope.launch {
-            val result = WarpController.start(context)
-            status = result.fold(
+            val result = WarpController.start(context, forceNewAccount = forceNew)
+            note = result.fold(
                 onSuccess = {
-                    "WARP реально поднялся (Cloudflare ответил на handshake).\n" +
-                        "Проверьте YouTube и Telegram.\n" +
-                        "Если всё ещё нет — UDP 2408 режется, нужен MTProto/другая сеть.\n" +
+                    "Готово: ${WarpController.status.value.modeLabelRu()}\n" +
                         WarpController.statusLine()
                 },
                 onFailure = { e ->
-                    "НЕ включён (раньше могло писать «OK» без handshake):\n${e.message}\n\n" +
-                        "1) «Новый аккаунт WARP»\n" +
-                        "2) Только LTE\n" +
-                        "3) Запасной 1.1.1.1 app\n" +
-                        "4) MTProto для Telegram"
+                    "Не удалось после авто-попыток:\n${e.message}\n\n" +
+                        "LTE / 1.1.1.1 app / MTProto"
                 },
             )
             busy = false
@@ -77,23 +80,31 @@ fun FullBypassScreen() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && pendingStart) {
             pendingStart = false
-            doStartWarp()
+            doStart(forceNew = false)
         } else {
             pendingStart = false
             busy = false
-            status = "Нужно разрешение VPN"
+            note = "Нужно разрешение VPN"
         }
     }
 
-    fun requestAndStart() {
+    fun requestAndStart(forceNew: Boolean) {
         val prepare = VpnService.prepare(context)
         if (prepare != null) {
             pendingStart = true
             busy = true
             vpnPermission.launch(prepare)
         } else {
-            doStartWarp()
+            doStart(forceNew)
         }
+    }
+
+    val statusColor = when (warp.mode) {
+        WarpMode.ON -> MaterialTheme.colorScheme.primaryContainer
+        WarpMode.STARTING -> MaterialTheme.colorScheme.tertiaryContainer
+        WarpMode.UNHEALTHY -> MaterialTheme.colorScheme.errorContainer
+        WarpMode.ERROR -> MaterialTheme.colorScheme.errorContainer
+        WarpMode.OFF -> MaterialTheme.colorScheme.surfaceVariant
     }
 
     Column(
@@ -103,102 +114,159 @@ fun FullBypassScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("WARP внутри DTMA", style = MaterialTheme.typography.headlineSmall)
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-            ),
-        ) {
-            Text(
-                modifier = Modifier.padding(12.dp),
-                text = "0.3.0: не считаем WARP «включённым», пока Cloudflare не ответил (rx>0). " +
-                    "IPv4-only + IP endpoint. WireGuard-приложение не нужно.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+        Text(
+            text = "WARP внутри DTMA",
+            style = MaterialTheme.typography.headlineSmall,
+        )
+
+        Card(colors = CardDefaults.cardColors(containerColor = statusColor)) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = "Статус: ${warp.modeLabelRu()}",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Text(text = warp.message, style = MaterialTheme.typography.bodyMedium)
+                Text(text = warp.trafficLine(), style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = "Endpoint: ${warp.endpoint ?: "—"}\n" +
+                        "Адрес: ${warp.address ?: "—"}\n" +
+                        "Попыток: ${warp.startAttempts} · авто-regen: ${warp.autoRegenUsed}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                val err = warp.lastError
+                if (!err.isNullOrBlank()) {
+                    Text(
+                        text = "Ошибка: $err",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
         }
 
-        if (warpOn) {
+        if (warp.mode == WarpMode.ON || warp.mode == WarpMode.UNHEALTHY) {
             Button(
                 onClick = {
                     busy = true
                     scope.launch {
                         WarpController.stop(context)
-                        status = "WARP выключен"
+                        note = "WARP выключен"
                         busy = false
                     }
                 },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(stringResource(R.string.warp_disable))
+                Text(text = stringResource(R.string.warp_disable))
             }
-        } else {
-            Button(
-                onClick = { requestAndStart() },
+            OutlinedButton(
+                onClick = {
+                    busy = true
+                    scope.launch {
+                        WarpController.recheck(context)
+                        note = "Проверка: ${WarpController.statusLine()}"
+                        busy = false
+                    }
+                },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                Text(text = "Проверить сейчас (ВКЛ/ВЫКЛ)")
+            }
+        } else {
+            Button(
+                onClick = { requestAndStart(forceNew = false) },
+                enabled = !busy && warp.mode != WarpMode.STARTING,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(
-                    if (busy) stringResource(R.string.warp_enabling)
-                    else stringResource(R.string.warp_enable),
+                    text = if (busy || warp.mode == WarpMode.STARTING) {
+                        stringResource(R.string.warp_enabling)
+                    } else {
+                        stringResource(R.string.warp_enable)
+                    },
                 )
             }
         }
 
         OutlinedButton(
-            onClick = {
-                WarpController.clearCachedConfig()
-                status = "Кэш сброшен. Включите WARP снова (новая регистрация)."
-            },
+            onClick = { requestAndStart(forceNew = true) },
+            enabled = !busy && warp.mode != WarpMode.STARTING,
             modifier = Modifier.fillMaxWidth(),
-            enabled = !busy && !warpOn,
         ) {
-            Text("Новый аккаунт WARP")
+            Text(text = "Новый аккаунт + включить")
         }
 
-        Text("Запасные пути", style = MaterialTheme.typography.titleMedium)
+        Text(text = "Фичи", style = MaterialTheme.typography.titleMedium)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Text(text = "Авто-reconnect", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = "Если WARP «заболел» (нет RX) — новый conf и перезапуск",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = autoReconnect,
+                onCheckedChange = { checked ->
+                    autoReconnect = checked
+                    WarpController.autoReconnect = checked
+                },
+            )
+        }
+
+        Text(
+            text = "• До 3 попыток с новой регистрацией Cloudflare, если conf не встаёт\n" +
+                "• Живой статус ВКЛ / ВЫКЛ / БОЛЬНОЙ\n" +
+                "• Счётчик ↓↑ трафика\n" +
+                "• IPv4-only + порт 2408",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text(text = "Запасные пути", style = MaterialTheme.typography.titleMedium)
         OutlinedButton(
             onClick = {
                 WarpInstaller.openCloudflareWarpApp(context)
-                status = "В 1.1.1.1 включите WARP. DTMA WARP выключите."
+                note = "В 1.1.1.1 включите WARP. DTMA WARP выключите."
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Приложение 1.1.1.1 WARP")
+            Text(text = "Приложение 1.1.1.1 WARP")
         }
         OutlinedButton(
             onClick = {
                 try {
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("tg://settings")))
                 } catch (_: Exception) {
-                    status = "Telegram → Настройки → Данные → Прокси → MTProto"
+                    note = "Telegram → Прокси → MTProto"
                 }
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("MTProto в Telegram")
+            Text(text = "MTProto в Telegram")
         }
 
-        if (status.isNotBlank()) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (warpOn) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                ),
-            ) {
+        if (note.isNotBlank()) {
+            Card {
                 Text(
+                    text = note,
                     modifier = Modifier.padding(12.dp),
-                    text = status,
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
         }
 
         Text(
-            "UI: ${vpnStatus.state} — ${vpnStatus.message.ifBlank { "—" }}\n${WarpController.statusLine()}",
+            text = "VpnUI: ${vpnStatus.state} — ${vpnStatus.message}\n${WarpController.statusLine()}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
