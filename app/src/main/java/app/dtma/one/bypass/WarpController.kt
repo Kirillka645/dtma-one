@@ -37,12 +37,10 @@ import kotlinx.coroutines.withContext
 object WarpController {
     private const val TAG = "DtmaWarp"
     /** Full start cycles (new Cloudflare account each fail). Keep small — user hates long waits. */
-    private const val MAX_AUTO_REGEN = 3
+    private const val MAX_AUTO_REGEN = 2
     private const val HEALTH_INTERVAL_MS = 3_000L
-    /** If ON but no RX growth for this long → unhealthy. */
     private const val STALL_MS = 25_000L
-    /** Handshake wait per endpoint (ms). */
-    private const val HANDSHAKE_WAIT_MS = 1_200L
+    private const val HANDSHAKE_WAIT_MS = 1_000L
     private const val HANDSHAKE_POLL_MS = 200L
 
     private val mutex = Mutex()
@@ -144,13 +142,14 @@ object WarpController {
         val m = e?.message ?: "fail"
         return when {
             m.contains("Unable to resolve", true) || m.contains("No address", true) ->
-                "DNS: нет api.cloudflareclient.com (сеть режет DNS). Смените LTE/Wi‑Fi"
+                "DNS: api.cloudflareclient.com. LTE/другой Wi‑Fi"
+            m.contains("Таймаут Cloudflare API", true) ||
+                m.contains("timeout", true) || m.contains("timed out", true) ->
+                "Таймаут CF API (HTTPS режется/медленно). LTE / VPN-off / 1.1.1.1 app"
             m.contains("handshake", true) || m.contains("rx=0", true) ->
-                "UDP к Cloudflare не проходит (порт 2408?). LTE / 1.1.1.1 app"
-            m.contains("timeout", true) || m.contains("timed out", true) ->
-                "Таймаут Cloudflare API"
+                "UDP CF (2408) не проходит. LTE / 1.1.1.1 app"
             m.contains("HTTP", true) -> m.take(80)
-            else -> m.take(120)
+            else -> m.take(140)
         }
     }
 
