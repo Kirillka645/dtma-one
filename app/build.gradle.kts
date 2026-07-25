@@ -13,8 +13,8 @@ android {
         applicationId = "app.dtma.one"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.3.3"
+        versionCode = 19
+        versionName = "0.3.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GIT_SHA", "\"dev\"")
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/Kirillka645/dtma-one\"")

@@ -8,42 +8,30 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /**
- * DNS for WARP registration when the operator's resolver is broken/poisoned
- * ("Unable to resolve host api.cloudflareclient.com").
- *
- * Strategy (no dependency on system DNS for Cloudflare hosts):
- * 1) Static bootstrap map (last-known / documented anycast)
- * 2) Plain UDP/53 to public resolvers by **IP** (1.1.1.1, 8.8.8.8, …)
- * 3) System DNS as last resort
+ * Fast multi-resolver DNS for Cloudflare hosts when operator DNS fails.
+ * Parallel UDP to a few public resolvers (by IP), 1s budget total.
  */
 object WarpBootstrapDns : Dns {
     private const val TAG = "DtmaWarpDns"
 
-    /** Public resolvers as IPs — must not need DNS to reach them. */
     private val bootstrapResolvers = listOf(
         "1.1.1.1",
-        "1.0.0.1",
         "8.8.8.8",
-        "8.8.4.4",
         "9.9.9.9",
-        "208.67.222.222", // OpenDNS
-        "94.140.14.14", // AdGuard
-        "76.76.2.0", // Control D
+        "1.0.0.1",
     )
 
-    /**
-     * Optional static hints (Cloudflare anycast moves; used only as extra candidates).
-     * Updated opportunistically when UDP resolve succeeds.
-     */
     private val staticHints = ConcurrentHashMap<String, List<String>>()
-
     private val cache = ConcurrentHashMap<String, Pair<Long, List<InetAddress>>>()
-    private const val CACHE_MS = 10 * 60_000L
+    private const val CACHE_MS = 15 * 60_000L
 
     init {
-        // Seed common WARP / CF API hosts — may go stale; UDP resolve overrides.
         staticHints["api.cloudflareclient.com"] = listOf(
             "104.16.132.229",
             "104.16.133.229",
@@ -54,16 +42,12 @@ object WarpBootstrapDns : Dns {
             "162.159.192.1",
             "162.159.193.1",
             "162.159.195.1",
-            "188.114.98.0",
-            "188.114.99.0",
         )
     }
 
     override fun lookup(hostname: String): List<InetAddress> {
         val host = hostname.trim().lowercase().trimEnd('.')
         if (host.isEmpty()) return emptyList()
-
-        // Literal IP
         if (host.matches(Regex("""\d+\.\d+\.\d+\.\d+"""))) {
             return listOf(InetAddress.getByName(host))
         }
@@ -73,62 +57,68 @@ object WarpBootstrapDns : Dns {
             if (now - at < CACHE_MS && list.isNotEmpty()) return list
         }
 
-        val found = LinkedHashSet<InetAddress>()
+        // Parallel UDP — first success wins (max ~1s)
+        val resolved = parallelUdpResolve(host, timeoutMs = 1000)
+        if (resolved.isNotEmpty()) {
+            cache[host] = now to resolved
+            staticHints[host] = resolved.mapNotNull { it.hostAddress }
+            Log.i(TAG, "ok $host → ${resolved.map { it.hostAddress }}")
+            return resolved
+        }
 
-        // 1) UDP to bootstrap resolvers
-        for (resolver in bootstrapResolvers) {
-            try {
-                val addrs = udpQueryA(host, resolver, timeoutMs = 1500)
-                if (addrs.isNotEmpty()) {
-                    found.addAll(addrs)
-                    staticHints[host] = addrs.mapNotNull { it.hostAddress }
-                    Log.i(TAG, "UDP $resolver → $host = ${addrs.map { it.hostAddress }}")
-                    break
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "UDP $resolver $host: ${e.message}")
+        // Static hints (instant) so registration can still attempt TLS
+        val hints = staticHints[host].orEmpty().mapNotNull {
+            runCatching { InetAddress.getByName(it) }.getOrNull()
+        }
+        if (hints.isNotEmpty()) {
+            Log.w(TAG, "using static hints for $host: ${hints.map { it.hostAddress }}")
+            cache[host] = now to hints
+            return hints
+        }
+
+        return try {
+            Dns.SYSTEM.lookup(host).also {
+                if (it.isNotEmpty()) cache[host] = now to it
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "FAILED $host: ${e.message}")
+            emptyList()
         }
-
-        // 2) Static hints
-        staticHints[host]?.forEach { ip ->
-            runCatching { found.add(InetAddress.getByName(ip)) }
-        }
-
-        // 3) System DNS last
-        if (found.isEmpty()) {
-            try {
-                found.addAll(Dns.SYSTEM.lookup(host))
-            } catch (e: Exception) {
-                Log.w(TAG, "SYSTEM $host: ${e.message}")
-            }
-        }
-
-        val list = found.toList()
-        if (list.isNotEmpty()) {
-            cache[host] = now to list
-        } else {
-            Log.e(TAG, "FAILED resolve $host on all paths")
-        }
-        return list
     }
 
-    /** Force-refresh resolve (ignore cache). */
     fun resolveFresh(hostname: String): List<InetAddress> {
         cache.remove(hostname.trim().lowercase().trimEnd('.'))
         return lookup(hostname)
     }
 
+    private fun parallelUdpResolve(name: String, timeoutMs: Long): List<InetAddress> {
+        val winner = AtomicReference<List<InetAddress>?>(null)
+        val latch = CountDownLatch(1)
+        val threads = bootstrapResolvers.map { resolver ->
+            thread(isDaemon = true, name = "warp-dns-$resolver") {
+                if (winner.get() != null) return@thread
+                try {
+                    val addrs = udpQueryA(name, resolver, timeoutMs = timeoutMs.toInt())
+                    if (addrs.isNotEmpty() && winner.compareAndSet(null, addrs)) {
+                        latch.countDown()
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        val result = winner.get().orEmpty()
+        // don't join forever
+        threads.forEach { it.interrupt() }
+        return result
+    }
+
     private fun udpQueryA(name: String, resolverIp: String, timeoutMs: Int): List<InetAddress> {
         val query = buildQuery(name, type = 1)
         DatagramSocket().use { socket ->
-            socket.soTimeout = timeoutMs
+            socket.soTimeout = timeoutMs.coerceIn(400, 2000)
             socket.send(
-                DatagramPacket(
-                    query,
-                    query.size,
-                    InetSocketAddress(resolverIp, 53),
-                ),
+                DatagramPacket(query, query.size, InetSocketAddress(resolverIp, 53)),
             )
             val buf = ByteArray(2048)
             val resp = DatagramPacket(buf, buf.size)
@@ -147,16 +137,15 @@ object WarpBootstrapDns : Dns {
         }
         nameBytes += 0
         val buf = ByteBuffer.allocate(12 + nameBytes.size + 4)
-        val id = (System.nanoTime() and 0xFFFF).toInt()
-        buf.putShort(id.toShort())
-        buf.putShort(0x0100) // RD
-        buf.putShort(1) // QD
+        buf.putShort((System.nanoTime() and 0xFFFF).toShort())
+        buf.putShort(0x0100)
+        buf.putShort(1)
         buf.putShort(0)
         buf.putShort(0)
         buf.putShort(0)
         buf.put(nameBytes.toByteArray())
         buf.putShort(type.toShort())
-        buf.putShort(1) // IN
+        buf.putShort(1)
         return buf.array()
     }
 

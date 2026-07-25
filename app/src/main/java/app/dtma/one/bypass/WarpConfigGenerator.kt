@@ -12,26 +12,20 @@ import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 /**
- * Free Cloudflare WARP account → WireGuard conf.
- *
- * DNS for api.cloudflareclient.com uses [WarpBootstrapDns] (UDP to 1.1.1.1/8.8.8.8/… by IP)
- * so operator DNS poison/blackhole does not block registration.
+ * Fast WARP registration: bootstrap DNS + 1–2 API paths, short timeouts.
  */
 object WarpConfigGenerator {
     private const val TAG = "DtmaWarp"
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
-    /** API path variants + optional IP-literal hosts after resolve. */
-    private val regPathVersions = listOf(
-        "v0a2158",
-        "v0a1922",
-        "v0a2477",
-        "v0a2535",
-        "v0a2592",
+    /** Prefer one working API version; one fallback only. */
+    private val regUrls = listOf(
+        "https://api.cloudflareclient.com/v0a2158/reg",
+        "https://api.cloudflareclient.com/v0a1922/reg",
     )
 
-    /** WireGuard peer ports to try when building conf candidates. */
-    val PEER_PORTS = listOf(2408, 500, 4500, 1701, 443, 4443, 8443)
+    /** Few ports for quick handshake (not 7×N explosion). */
+    val PEER_PORTS = listOf(2408, 443, 500)
 
     data class Result(
         val confText: String,
@@ -40,7 +34,6 @@ object WarpConfigGenerator {
         val clientId: String,
         val privateKey: String,
         val publicKey: String,
-        /** Alternate endpoints (same peer key, other ports / IPs) for handshake retry. */
         val endpointCandidates: List<String> = listOf(endpoint),
         val peerPublicKey: String = "",
     )
@@ -48,9 +41,9 @@ object WarpConfigGenerator {
     private val http: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .dns(WarpBootstrapDns)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .callTimeout(35, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(12, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
@@ -59,47 +52,34 @@ object WarpConfigGenerator {
         val keys = KeyPair()
         val privB64 = keys.privateKey.toBase64()
         val pubB64 = keys.publicKey.toBase64()
-        val tos = Instant.now().toString()
         val bodyJson = JSONObject()
             .put("key", pubB64)
             .put("install_id", "")
             .put("fcm_token", "")
-            .put("tos", tos)
+            .put("tos", Instant.now().toString())
             .put("model", "PC")
             .put("type", "Android")
             .put("locale", "en_US")
             .toString()
 
-        // Warm DNS before HTTP (logs clearer)
-        val apiIps = try {
-            WarpBootstrapDns.resolveFresh("api.cloudflareclient.com")
-                .mapNotNull { it.hostAddress }
-        } catch (e: Exception) {
-            Log.w(TAG, "pre-resolve api: ${e.message}")
-            emptyList()
-        }
-        Log.i(TAG, "api.cloudflareclient.com → $apiIps")
-
-        val urls = buildRegUrls(apiIps)
         var lastError: Exception? = null
-        for (url in urls) {
+        for (url in regUrls) {
             try {
                 val req = Request.Builder()
                     .url(url)
                     .header("User-Agent", "okhttp/3.12.1")
                     .header("CF-Client-Version", "a-6.30-2158")
                     .header("Content-Type", "application/json; charset=UTF-8")
-                    .header("Host", "api.cloudflareclient.com")
                     .post(bodyJson.toRequestBody(jsonMedia))
                     .build()
                 http.newCall(req).execute().use { resp ->
                     val text = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
-                        Log.w(TAG, "reg $url HTTP ${resp.code}: ${text.take(200)}")
-                        lastError = IllegalStateException("WARP reg HTTP ${resp.code}")
+                        lastError = IllegalStateException("HTTP ${resp.code}")
+                        Log.w(TAG, "reg $url → ${resp.code}")
                         return@use
                     }
-                    Log.i(TAG, "reg ok via $url")
+                    Log.i(TAG, "reg ok $url")
                     return parseResponse(text, privB64, pubB64)
                 }
             } catch (e: Exception) {
@@ -107,25 +87,10 @@ object WarpConfigGenerator {
                 lastError = e
             }
         }
-        throw lastError
-            ?: IllegalStateException(
-                "WARP registration failed (DNS/API). api IPs tried=$apiIps",
-            )
-    }
-
-    private fun buildRegUrls(apiIps: List<String>): List<String> {
-        val out = ArrayList<String>()
-        // Hostname URLs (OkHttp uses WarpBootstrapDns)
-        for (ver in regPathVersions) {
-            out += "https://api.cloudflareclient.com/$ver/reg"
-        }
-        // Direct IP URLs — still send Host header for TLS SNI... OkHttp SNI uses URL host.
-        // Connecting by IP with hostname URL is enough via Dns; IP URLs need careful TLS.
-        // Prefer Dns override only — but also try IP with hostname as okhttp "hack":
-        // https://104.x.x.x/v0a2158/reg won't pass cert for IP. So DNS fix is the real fix.
-        // Keep IP list for logging / future pin.
-        Log.d(TAG, "reg URL count=${out.size} bootstrapIps=$apiIps")
-        return out
+        throw lastError ?: IllegalStateException(
+            "Не удалось зарегистрировать WARP (DNS/API Cloudflare). " +
+                "Проверьте интернет без VPN или смените сеть.",
+        )
     }
 
     private fun parseResponse(text: String, privateKeyB64: String, publicKeyB64: String): Result {
@@ -145,15 +110,14 @@ object WarpConfigGenerator {
 
         val primary = resolveEndpoint(endpointObj)
         val candidates = buildEndpointCandidates(endpointObj, primary)
-
         val conf = confFor(privateKeyB64, v4, peerPub, primary)
 
         val epPort = primary.substringAfterLast(':', "").toIntOrNull()
         if (epPort == null || epPort !in 1..65535) {
-            error("Bad WARP endpoint port in '$primary'")
+            error("Bad endpoint '$primary'")
         }
 
-        Log.i(TAG, "WARP conf addr=$v4 endpoint=$primary candidates=$candidates")
+        Log.i(TAG, "conf endpoint=$primary candidates=${candidates.size}")
         return Result(
             confText = conf,
             addressV4 = v4,
@@ -172,8 +136,6 @@ object WarpConfigGenerator {
         peerPublicKey: String,
         endpoint: String,
     ): String = buildString {
-        appendLine("# DTMA One in-app Cloudflare WARP (IPv4)")
-        appendLine()
         appendLine("[Interface]")
         appendLine("PrivateKey = $privateKeyB64")
         appendLine("Address = $addressCidr")
@@ -187,56 +149,31 @@ object WarpConfigGenerator {
         appendLine("PersistentKeepalive = 25")
     }
 
-    /** Swap only Endpoint line for port/IP retry without re-register. */
     fun withEndpoint(base: Result, endpoint: String): Result {
         val conf = confFor(base.privateKey, base.addressV4, base.peerPublicKey, endpoint)
         return base.copy(confText = conf, endpoint = endpoint)
     }
 
+    /** At most ~3–4 endpoints for a fast start. */
     private fun buildEndpointCandidates(endpointObj: JSONObject, primary: String): List<String> {
-        val set = LinkedHashSet<String>()
-        set += primary
+        val out = LinkedHashSet<String>()
+        out += primary
 
-        val hostField = endpointObj.optString("host").orEmpty()
-        val v4Field = endpointObj.optString("v4").orEmpty().substringBefore('/')
-        val (ipFromV4, _) = WarpEndpoint.splitIpv4AndPort(
-            if (v4Field.contains(':') && v4Field.count { it == ':' } == 1) {
-                v4Field.substringBefore(':') + ":2408"
-            } else {
-                v4Field.ifBlank { "0.0.0.0" }
-            },
+        val v4Field = endpointObj.optString("v4").orEmpty().trim().substringBefore('/')
+        val (ip, _) = WarpEndpoint.splitIpv4AndPort(
+            if (v4Field.contains(':')) v4Field else "$v4Field:2408",
         )
-        val ip = when {
-            ipFromV4.isNotBlank() && ipFromV4 != "0.0.0.0" && !ipFromV4.contains(':') -> ipFromV4
-            primary.count { it == ':' } == 1 && primary.substringBefore(':').contains('.') ->
-                primary.substringBefore(':')
-            else -> null
+        if (ip.isNotBlank() && ip.contains('.')) {
+            for (p in PEER_PORTS) out += "$ip:$p"
         }
-
-        // Resolve engage host for extra anycast IPs
-        val engageIps = try {
-            WarpBootstrapDns.lookup("engage.cloudflareclient.com").mapNotNull { it.hostAddress }
-        } catch (_: Exception) {
-            emptyList()
+        // one extra anycast from hints if different
+        runCatching {
+            WarpBootstrapDns.lookup("engage.cloudflareclient.com")
+                .firstOrNull()?.hostAddress
+        }.getOrNull()?.let { eng ->
+            if (eng != ip) out += "$eng:2408"
         }
-
-        val ips = LinkedHashSet<String>()
-        if (ip != null) ips += ip
-        ips.addAll(engageIps)
-
-        for (addr in ips) {
-            for (port in PEER_PORTS) {
-                set += "$addr:$port"
-            }
-        }
-        // hostname + ports
-        if (hostField.isNotBlank()) {
-            val h = hostField.substringBefore(':')
-            for (port in PEER_PORTS) {
-                set += "$h:$port"
-            }
-        }
-        return set.toList()
+        return out.take(4)
     }
 
     private fun resolveEndpoint(endpointObj: JSONObject): String {

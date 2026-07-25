@@ -36,11 +36,14 @@ import kotlinx.coroutines.withContext
  */
 object WarpController {
     private const val TAG = "DtmaWarp"
-    /** Full start cycles (new Cloudflare account each fail). */
-    private const val MAX_AUTO_REGEN = 10
-    private const val HEALTH_INTERVAL_MS = 2_500L
-    /** If ON but no RX growth for this long while TX grows → unhealthy. */
-    private const val STALL_MS = 20_000L
+    /** Full start cycles (new Cloudflare account each fail). Keep small — user hates long waits. */
+    private const val MAX_AUTO_REGEN = 3
+    private const val HEALTH_INTERVAL_MS = 3_000L
+    /** If ON but no RX growth for this long → unhealthy. */
+    private const val STALL_MS = 25_000L
+    /** Handshake wait per endpoint (ms). */
+    private const val HANDSHAKE_WAIT_MS = 1_200L
+    private const val HANDSHAKE_POLL_MS = 200L
 
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -87,18 +90,14 @@ object WarpController {
 
                 stopInternal(keepService = false)
                 stopLocalHev(app)
-                delay(400)
+                delay(200)
 
                 var lastErr: Exception? = null
                 var regen = 0
                 for (attempt in 1..MAX_AUTO_REGEN) {
                     publish(
                         mode = WarpMode.STARTING,
-                        message = if (attempt == 1) {
-                            "WARP: регистрация / запуск (попытка $attempt/$MAX_AUTO_REGEN)…"
-                        } else {
-                            "WARP: conf не встал — новый аккаунт Cloudflare ($attempt/$MAX_AUTO_REGEN)…"
-                        },
+                        message = "WARP $attempt/$MAX_AUTO_REGEN…",
                         attempts = attempt,
                         autoRegen = regen,
                     )
@@ -120,25 +119,40 @@ object WarpController {
                     confCache = null
                     regen++
                     tearDownTunnel()
-                    delay(600)
+                    delay(200)
                 }
 
+                val errMsg = shortError(lastErr)
                 publish(
                     mode = WarpMode.ERROR,
-                    message = "WARP не поднялся после $MAX_AUTO_REGEN попыток",
-                    error = lastErr?.message,
+                    message = "WARP ошибка: $errMsg",
+                    error = errMsg,
                     attempts = MAX_AUTO_REGEN,
                     autoRegen = regen,
                 )
                 VpnStateHolder.set(
                     VpnRuntimeStatus(
                         state = VpnUiState.ERROR,
-                        message = "WARP: ${lastErr?.message ?: "fail"}",
+                        message = "WARP: $errMsg",
                     ),
                 )
-                Result.failure(lastErr ?: Exception("WARP failed"))
+                Result.failure(lastErr ?: Exception(errMsg))
             }
         }
+
+    private fun shortError(e: Exception?): String {
+        val m = e?.message ?: "fail"
+        return when {
+            m.contains("Unable to resolve", true) || m.contains("No address", true) ->
+                "DNS: нет api.cloudflareclient.com (сеть режет DNS). Смените LTE/Wi‑Fi"
+            m.contains("handshake", true) || m.contains("rx=0", true) ->
+                "UDP к Cloudflare не проходит (порт 2408?). LTE / 1.1.1.1 app"
+            m.contains("timeout", true) || m.contains("timed out", true) ->
+                "Таймаут Cloudflare API"
+            m.contains("HTTP", true) -> m.take(80)
+            else -> m.take(120)
+        }
+    }
 
     suspend fun stop(context: Context) = mutex.withLock {
         withContext(Dispatchers.IO) {
@@ -161,49 +175,36 @@ object WarpController {
     }
 
     private suspend fun bringUpOnce(app: Context, attempt: Int) {
-        // Pre-resolve Cloudflare API (operator DNS often broken).
-        try {
-            val ips = WarpBootstrapDns.resolveFresh("api.cloudflareclient.com")
-            Log.i(TAG, "DNS api.cloudflareclient.com → ${ips.map { it.hostAddress }}")
-            if (ips.isEmpty()) {
-                Log.w(TAG, "API host unresolved — generate() still tries bootstrap DNS in OkHttp")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "pre-DNS: ${e.message}")
-        }
-
+        publish(
+            mode = WarpMode.STARTING,
+            message = "WARP: регистрация Cloudflare…",
+            attempts = attempt,
+        )
         val generated = confCache ?: WarpConfigGenerator.generate().also {
             confCache = it
             WarpInstaller.writeConf(app, it.confText)
         }
-        Log.i(
-            TAG,
-            "attempt=$attempt primary=${generated.endpoint} " +
-                "candidates=${generated.endpointCandidates.size} addr=${generated.addressV4}",
-        )
 
         ContextCompat.startForegroundService(
             app,
             Intent(app, WarpVpnService::class.java).setAction(WarpVpnService.ACTION_START),
         )
         var wait = 0
-        while (wait < 50 && !WarpVpnService.isAlive) {
-            delay(100)
+        while (wait < 25 && !WarpVpnService.isAlive) {
+            delay(80)
             wait++
         }
         if (!WarpVpnService.isAlive) error("WarpVpnService не стартовал")
-        delay(200)
+        delay(100)
 
         val be = backend ?: GoBackend(app).also { backend = it }
-
-        // Try each endpoint (ports 2408/500/4500/… and engage anycast IPs) before failing.
-        val endpoints = generated.endpointCandidates.ifEmpty { listOf(generated.endpoint) }
+        val endpoints = generated.endpointCandidates.ifEmpty { listOf(generated.endpoint) }.take(3)
         var lastTx = 0L
         var lastEp = generated.endpoint
+
         for ((idx, ep) in endpoints.withIndex()) {
             lastEp = ep
             val variant = WarpConfigGenerator.withEndpoint(generated, ep)
-            confCache = variant
             val config = Config.parse(
                 ByteArrayInputStream(variant.confText.toByteArray(Charsets.UTF_8)),
             )
@@ -211,22 +212,21 @@ object WarpController {
                 be.setState(WarpTunnel, Tunnel.State.DOWN, null)
             } catch (_: Exception) {
             }
-            delay(150)
 
             publish(
                 mode = WarpMode.STARTING,
-                message = "WARP: handshake $ep (${idx + 1}/${endpoints.size})…",
+                message = "WARP: $ep (${idx + 1}/${endpoints.size})",
                 endpoint = ep,
                 address = generated.addressV4,
                 attempts = attempt,
             )
-            val st = be.setState(WarpTunnel, Tunnel.State.UP, config)
-            Log.i(TAG, "setState $ep → $st")
+            be.setState(WarpTunnel, Tunnel.State.UP, config)
 
+            val deadline = System.currentTimeMillis() + HANDSHAKE_WAIT_MS
             var rx = 0L
             var tx = 0L
-            repeat(8) { i ->
-                delay(350)
+            while (System.currentTimeMillis() < deadline) {
+                delay(HANDSHAKE_POLL_MS)
                 try {
                     val s = be.getStatistics(WarpTunnel)
                     rx = s.totalRx()
@@ -262,13 +262,10 @@ object WarpController {
                     Log.w(TAG, "stats: ${e.message}")
                 }
             }
-            Log.w(TAG, "no handshake on $ep tx=$tx")
+            Log.w(TAG, "no handshake $ep tx=$tx")
         }
 
-        error(
-            "Нет handshake на ${endpoints.size} endpoint/портах (tx=$lastTx last=$lastEp). " +
-                "Оператор может резать UDP WARP.",
-        )
+        error("handshake fail (tx=$lastTx last=$lastEp)")
     }
 
     private fun startMonitor(app: Context) {
