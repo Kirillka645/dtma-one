@@ -125,6 +125,28 @@ fun SettingsScreen() {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         RowSwitch(
+            title = "Telegram smart path (гонка портов)",
+            checked = settings.telegramSmartPath,
+            onChecked = { v ->
+                scope.launch {
+                    DtmaApp.instance.settingsRepository.update { it.copy(telegramSmartPath = v) }
+                }
+            },
+        )
+        Text(
+            "Если probe 2/26: при CONNECT на DC гоняем 443/80/5222 и сети параллельно, " +
+                "берём первый живой порт на ТОМ ЖЕ IP (часто 443 мёртв, 80/5222 жив). " +
+                "Чужой DC не подставляем. При старте VPN — авто-probe в кэш. " +
+                "Перезапустите VPN и Telegram.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            app.dtma.one.vpn.TelegramPathCache.summaryForUi(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        RowSwitch(
             title = "Telegram multipath (Wi‑Fi ↔ LTE)",
             checked = settings.telegramMultipath,
             onChecked = { v ->

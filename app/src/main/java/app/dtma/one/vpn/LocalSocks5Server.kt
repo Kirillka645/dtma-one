@@ -31,6 +31,11 @@ class LocalSocks5Server(
     private val bindPort: Int = 18080,
     /** For Telegram DC IPs: try cellular/other network before default (no SOCKS5 needed). */
     private val telegramMultipath: Boolean = true,
+    /**
+     * Race ports 443/80/5222 (+ cache) on Telegram IPs so blackholed 443 does not hang the client.
+     * Same host only — never swaps DC address.
+     */
+    private val telegramSmartPath: Boolean = true,
 ) {
     companion object {
         private const val TAG = "DtmaSocks5"
@@ -140,7 +145,23 @@ class LocalSocks5Server(
         try {
             client.soTimeout = 0
             val isTg = TelegramRanges.isTelegramHost(dest)
-            if (telegramMultipath && isTg) {
+            if (isTg && telegramSmartPath) {
+                val smart = TelegramSmartConnect.connect(
+                    context = vpn,
+                    vpn = vpn,
+                    dest = dest,
+                    requestedPort = port,
+                    multipath = telegramMultipath,
+                )
+                if (smart != null) {
+                    remote = smart.socket
+                    Log.i(
+                        TAG,
+                        "Telegram smart ${dest.hostAddress}:$port → :${smart.connectedPort} via ${smart.via}" +
+                            if (smart.remappedPort) " (port remap)" else "",
+                    )
+                }
+            } else if (isTg && telegramMultipath) {
                 val multi = MultipathEgress.connect(
                     context = vpn,
                     vpn = vpn,
@@ -155,6 +176,7 @@ class LocalSocks5Server(
                 }
             }
             if (remote == null) {
+                // Non-Telegram, or smart race lost: single attempt with short timeout for TG.
                 val sock = Socket()
                 remote = sock
                 if (!vpn.protect(sock)) {
@@ -168,7 +190,11 @@ class LocalSocks5Server(
                 sock.keepAlive = true
                 // Telegram push sessions stay idle for a long time — never time out the pipe.
                 sock.soTimeout = 0
-                sock.connect(InetSocketAddress(dest, port), 15_000)
+                val connectTimeout = if (isTg) 4_000 else 15_000
+                sock.connect(InetSocketAddress(dest, port), connectTimeout)
+                if (isTg) {
+                    TelegramPathCache.rememberOk(dest.hostAddress ?: "", port, "fallback")
+                }
             }
 
             val r = remote!!

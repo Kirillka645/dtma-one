@@ -32,6 +32,7 @@ import app.dtma.one.core.network.dns.DnsResolveResult
 import app.dtma.one.core.network.dns.SystemDnsResolver
 import app.dtma.one.core.network.https.StrictHttpsTester
 import app.dtma.one.vpn.TelegramDcProbe
+import app.dtma.one.vpn.TelegramPathCache
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -145,7 +146,9 @@ fun ConnectionTestScreen() {
                     summary = "Probing Telegram DCs…"
                     try {
                         val results = TelegramDcProbe.probeAll()
-                        summary = TelegramDcProbe.summarize(results)
+                        TelegramPathCache.ingestProbe(results)
+                        summary = TelegramDcProbe.summarize(results) +
+                            "\n\n" + TelegramPathCache.summaryForUi()
                         events = results.map {
                             "${if (it.ok) "OK" else "FAIL"} ${it.target.label} ${it.target.host} ${it.error ?: "${it.ms}ms"}"
                         }

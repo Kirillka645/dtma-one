@@ -39,6 +39,11 @@ data class UserSettings(
      * before default path. No remote proxy / SOCKS5 required when only one path is blocked.
      */
     val telegramMultipath: Boolean = true,
+    /**
+     * Race Telegram ports (443/80/5222) + networks; prefer probe hits.
+     * Same DC IP only — does not swap to another data center.
+     */
+    val telegramSmartPath: Boolean = true,
     /** Optional MTProto proxy for Telegram client deep-link (not used by DTMA tunnel). */
     val mtprotoHost: String = "",
     val mtprotoPort: Int = 443,
@@ -75,6 +80,7 @@ class SettingsRepository(private val context: Context) {
         val knownUpdateTag = stringPreferencesKey("known_update_tag")
         val knownUpdateUrl = stringPreferencesKey("known_update_url")
         val tgMultipath = booleanPreferencesKey("tg_multipath")
+        val tgSmart = booleanPreferencesKey("tg_smart")
         val mtprotoHost = stringPreferencesKey("mtproto_host")
         val mtprotoPort = intPreferencesKey("mtproto_port")
         val mtprotoSecret = stringPreferencesKey("mtproto_secret")
@@ -133,6 +139,7 @@ class SettingsRepository(private val context: Context) {
             lastKnownUpdateTag = p[Keys.knownUpdateTag].orEmpty(),
             lastKnownUpdateUrl = p[Keys.knownUpdateUrl].orEmpty(),
             telegramMultipath = p[Keys.tgMultipath] ?: true,
+            telegramSmartPath = p[Keys.tgSmart] ?: true,
             mtprotoHost = p[Keys.mtprotoHost].orEmpty(),
             mtprotoPort = p[Keys.mtprotoPort] ?: 443,
             mtprotoSecret = p[Keys.mtprotoSecret].orEmpty(),
@@ -159,6 +166,7 @@ class SettingsRepository(private val context: Context) {
         prefs[Keys.knownUpdateTag] = next.lastKnownUpdateTag
         prefs[Keys.knownUpdateUrl] = next.lastKnownUpdateUrl
         prefs[Keys.tgMultipath] = next.telegramMultipath
+        prefs[Keys.tgSmart] = next.telegramSmartPath
         prefs[Keys.mtprotoHost] = next.mtprotoHost.trim()
         prefs[Keys.mtprotoPort] = next.mtprotoPort.coerceIn(1, 65535)
         prefs[Keys.mtprotoSecret] = next.mtprotoSecret.trim()

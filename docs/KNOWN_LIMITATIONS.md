@@ -13,8 +13,9 @@
 
 - Client often uses **hardcoded DC IPs** — DNS/PAER does not apply.
 - Probe all DC timeouts on **one** network ⇒ try **multipath** (Wi‑Fi + LTE): DTMA binds Telegram DC sockets to the other underlying network (no SOCKS5).
+- **Smart path (0.2.6+):** on Telegram DC CONNECT, race ports 443/80/5222 + networks; prefer probe cache. Same IP only (no cross-DC rewrite — breaks MTProto). Helps 2/N when 443 is dead but 80/5222 live.
 - Probe 0/N on **all** paths ⇒ no pure-local fix; need MTProto / user SOCKS5 / other network / VPS.
-- Workarounds without SOCKS5: multipath, official **MTProto** (`tg://proxy`), dual-SIM / other ISP.
+- Workarounds without SOCKS5: smart path, multipath, official **MTProto** (`tg://proxy`), dual-SIM / other ISP.
 - With infrastructure: **Settings → upstream SOCKS5** or self-hosted MTProto.
 
 ## Built-in HTTPS test

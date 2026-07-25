@@ -85,7 +85,11 @@ object TelegramDcProbe {
             )
         } else {
             sb.append("Доступны: ${ok.joinToString { it.target.label }}.\n")
-            sb.append("Если TG всё равно висит — перезапустите Telegram при включённом DTMA 0.2.1+.\n")
+            sb.append(
+                "Smart path (0.2.6+): при CONNECT к DC гоняет порты/сети и предпочитает эти ✓. " +
+                    "Если «ваш» DC среди ✗ — клиент всё равно может висеть; тогда MTProto/другая сеть.\n" +
+                    "Включите VPN (smart path ON) → перезапустите Telegram.\n",
+            )
         }
         return sb.toString()
     }

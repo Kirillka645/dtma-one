@@ -17,7 +17,11 @@ import app.dtma.one.core.model.VpnUiState
 import app.dtma.one.core.network.NetworkContextFactory
 import app.dtma.one.core.storage.UserSettings
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -34,6 +38,7 @@ class DtmaVpnService : VpnService() {
     private var socks5: LocalSocks5Server? = null
     private var hevRunning = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -80,19 +85,34 @@ class DtmaVpnService : VpnService() {
                 Log.i(TAG, "User upstream SOCKS5 $socksHost:$socksPort")
             } else {
                 val multipath = settings.telegramMultipath
+                val smart = settings.telegramSmartPath
                 val socks = LocalSocks5Server(
                     vpn = this,
                     bindPort = 18080,
                     telegramMultipath = multipath,
+                    telegramSmartPath = smart,
                 )
                 socks.start()
                 socks5 = socks
                 socksHost = "127.0.0.1"
                 socksPort = socks.listenPort
-                modeLabel = if (multipath) {
-                    "Local · multipath Telegram (Wi‑Fi/LTE without SOCKS5)"
-                } else {
-                    "Local SOCKS5 · same ISP"
+                modeLabel = buildString {
+                    append("Local")
+                    if (smart) append(" · TG smart path (port race)")
+                    if (multipath) append(" · multipath")
+                    if (!smart && !multipath) append(" SOCKS5 · same ISP")
+                }
+                if (smart) {
+                    // Warm cache so first Telegram connect already prefers working ports.
+                    serviceScope.launch {
+                        try {
+                            val results = TelegramDcProbe.probeAll(timeoutMs = 2500)
+                            TelegramPathCache.ingestProbe(results)
+                            Log.i(TAG, "TG cache warm: ${TelegramPathCache.snapshotShort()}")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "TG probe warm failed: ${e.message}")
+                        }
+                    }
                 }
             }
 
