@@ -29,6 +29,8 @@ class LocalSocks5Server(
     private val vpn: VpnService,
     private val bindHost: String = "127.0.0.1",
     private val bindPort: Int = 18080,
+    /** For Telegram DC IPs: try cellular/other network before default (no SOCKS5 needed). */
+    private val telegramMultipath: Boolean = true,
 ) {
     companion object {
         private const val TAG = "DtmaSocks5"
@@ -134,23 +136,43 @@ class LocalSocks5Server(
         dest: InetAddress,
         port: Int,
     ) {
-        val remote = Socket()
+        var remote: Socket? = null
         try {
-            if (!vpn.protect(remote)) {
-                Log.w(TAG, "protect failed TCP ${dest.hostAddress}:$port")
-                reply(output, 0x01, InetAddress.getByName("0.0.0.0"), 0)
-                tcpConnectFail++
-                client.close()
-                return
-            }
-            remote.tcpNoDelay = true
-            remote.keepAlive = true
-            // Telegram push sessions stay idle for a long time — never time out the pipe.
-            remote.soTimeout = 0
             client.soTimeout = 0
-            remote.connect(InetSocketAddress(dest, port), 15_000)
+            val isTg = TelegramRanges.isTelegramHost(dest)
+            if (telegramMultipath && isTg) {
+                val multi = MultipathEgress.connect(
+                    context = vpn,
+                    vpn = vpn,
+                    dest = dest,
+                    port = port,
+                    timeoutMs = 8_000,
+                    preferAlternateFirst = true,
+                )
+                if (multi != null) {
+                    remote = multi.socket
+                    Log.i(TAG, "Telegram multipath ${dest.hostAddress}:$port via ${multi.via}")
+                }
+            }
+            if (remote == null) {
+                val sock = Socket()
+                remote = sock
+                if (!vpn.protect(sock)) {
+                    Log.w(TAG, "protect failed TCP ${dest.hostAddress}:$port")
+                    reply(output, 0x01, InetAddress.getByName("0.0.0.0"), 0)
+                    tcpConnectFail++
+                    client.close()
+                    return
+                }
+                sock.tcpNoDelay = true
+                sock.keepAlive = true
+                // Telegram push sessions stay idle for a long time — never time out the pipe.
+                sock.soTimeout = 0
+                sock.connect(InetSocketAddress(dest, port), 15_000)
+            }
 
-            val local = remote.localSocketAddress as? InetSocketAddress
+            val r = remote!!
+            val local = r.localSocketAddress as? InetSocketAddress
             val bindAddr = local?.address ?: InetAddress.getByName("0.0.0.0")
             val bindPort = local?.port ?: 0
             reply(output, 0x00, bindAddr, bindPort)
@@ -158,13 +180,13 @@ class LocalSocks5Server(
             Log.d(TAG, "CONNECT ok ${dest.hostAddress}:$port")
 
             val up = thread(isDaemon = true, name = "s5-c2s") {
-                pipe(input, remote.getOutputStream())
+                pipe(input, r.getOutputStream())
                 try {
-                    remote.shutdownOutput()
+                    r.shutdownOutput()
                 } catch (_: Exception) {
                 }
             }
-            pipe(remote.getInputStream(), output)
+            pipe(r.getInputStream(), output)
             try {
                 client.shutdownOutput()
             } catch (_: Exception) {
@@ -179,7 +201,7 @@ class LocalSocks5Server(
             }
         } finally {
             try {
-                remote.close()
+                remote?.close()
             } catch (_: Exception) {
             }
             try {

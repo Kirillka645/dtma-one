@@ -79,12 +79,21 @@ class DtmaVpnService : VpnService() {
                 modeLabel = "Upstream SOCKS5 $socksHost:$socksPort (ваш прокси)"
                 Log.i(TAG, "User upstream SOCKS5 $socksHost:$socksPort")
             } else {
-                val socks = LocalSocks5Server(this, bindPort = 18080)
+                val multipath = settings.telegramMultipath
+                val socks = LocalSocks5Server(
+                    vpn = this,
+                    bindPort = 18080,
+                    telegramMultipath = multipath,
+                )
                 socks.start()
                 socks5 = socks
                 socksHost = "127.0.0.1"
                 socksPort = socks.listenPort
-                modeLabel = "Local SOCKS5 · same ISP (blocked Telegram DC ≠ openable)"
+                modeLabel = if (multipath) {
+                    "Local · multipath Telegram (Wi‑Fi/LTE without SOCKS5)"
+                } else {
+                    "Local SOCKS5 · same ISP"
+                }
             }
 
             val builder = Builder()

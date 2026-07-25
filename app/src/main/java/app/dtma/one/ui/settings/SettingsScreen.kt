@@ -113,14 +113,93 @@ fun SettingsScreen() {
             },
         )
 
-        Text("Обход блокировок Telegram", style = MaterialTheme.typography.titleMedium)
+        Text("Обход блокировок Telegram (без SOCKS5)", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Если probe DC = 0/N, локальный режим бессилен (тот же ISP). " +
-                "Укажите СВОЙ SOCKS5 (VPS/прокси, где DC уже открыты). " +
-                "DTMA One не предоставляет сервер и не хранит ваши ключи у «нас».",
+            "1) Multipath: если Wi‑Fi режет DC, а мобильный интернет — нет, " +
+                "DTMA шлёт только Telegram через вторую сеть (Wi‑Fi+LTE одновременно). " +
+                "Сервер не нужен.\n" +
+                "2) MTProto: встроенный прокси Telegram (не SOCKS5) — откройте ссылку ниже.\n" +
+                "3) Если probe 0/N на ВСЕХ сетях (Wi‑Fi и LTE) — без внешнего пути " +
+                "(свой MTProto/VPS/другая сеть) не обойти. Локальная «магия» IP не создаёт.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        RowSwitch(
+            title = "Telegram multipath (Wi‑Fi ↔ LTE)",
+            checked = settings.telegramMultipath,
+            onChecked = { v ->
+                scope.launch {
+                    DtmaApp.instance.settingsRepository.update { it.copy(telegramMultipath = v) }
+                }
+            },
+        )
+        Text(
+            "Включите мобильные данные + Wi‑Fi. Перезапустите VPN после смены. " +
+                "Работает только если хотя бы один интерфейс видит DC.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text("MTProto proxy → Telegram", style = MaterialTheme.typography.titleSmall)
+        var mtHost by remember(settings.mtprotoHost) { mutableStateOf(settings.mtprotoHost) }
+        var mtPort by remember(settings.mtprotoPort) {
+            mutableStateOf(settings.mtprotoPort.toString())
+        }
+        var mtSecret by remember(settings.mtprotoSecret) {
+            mutableStateOf(settings.mtprotoSecret)
+        }
+        OutlinedTextField(
+            value = mtHost,
+            onValueChange = { mtHost = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("MTProto host") },
+            singleLine = true,
+        )
+        OutlinedTextField(
+            value = mtPort,
+            onValueChange = { mtPort = it.filter { ch -> ch.isDigit() }.take(5) },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("MTProto port") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+        OutlinedTextField(
+            value = mtSecret,
+            onValueChange = { mtSecret = it.trim() },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("secret (hex / ee…)") },
+            singleLine = true,
+        )
+        Button(
+            onClick = {
+                scope.launch {
+                    val p = mtPort.toIntOrNull() ?: 443
+                    DtmaApp.instance.settingsRepository.update {
+                        it.copy(
+                            mtprotoHost = mtHost.trim(),
+                            mtprotoPort = p,
+                            mtprotoSecret = mtSecret.trim(),
+                        )
+                    }
+                    val host = mtHost.trim()
+                    val secret = mtSecret.trim()
+                    if (host.isNotBlank() && secret.isNotBlank()) {
+                        val uri = android.net.Uri.parse(
+                            "tg://proxy?server=$host&port=$p&secret=$secret",
+                        )
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                        }
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = mtHost.isNotBlank() && mtSecret.isNotBlank(),
+        ) {
+            Text("Открыть в Telegram (MTProto)")
+        }
+
+        Text("Upstream SOCKS5 (если есть свой прокси)", style = MaterialTheme.typography.titleMedium)
         RowSwitch(
             title = "Использовать upstream SOCKS5",
             checked = settings.upstreamSocksEnabled,

@@ -72,12 +72,14 @@ object TelegramDcProbe {
         if (ok.isEmpty()) {
             sb.append(
                 "ВЫВОД: ни один DC Telegram не отвечает с этой сети (timeout/unreachable).\n\n" +
-                    "Локальный VPN DTMA One выходит через ТОГО ЖЕ провайдера и " +
-                    "НЕ МОЖЕТ открыть null-route / полную блокировку адресного пространства.\n\n" +
-                    "Что реально работает:\n" +
-                    "1) Внешний SOCKS5/VPN/MTProto, который УЖЕ видит DC (свой или купленный) — " +
-                    "укажите в Настройках «Upstream SOCKS5».\n" +
-                    "2) Официальный MTProto proxy в настройках самого Telegram.\n" +
+                    "Локальный VPN без внешнего пути НЕ создаёт маршруты к заблокированным IP.\n\n" +
+                    "Без SOCKS5 попробуйте:\n" +
+                    "1) Multipath: Wi‑Fi + мобильные данные — DTMA шлёт Telegram через LTE, " +
+                    "если домашний Wi‑Fi режет DC (Настройки → Telegram multipath).\n" +
+                    "2) MTProto proxy в Telegram (Настройки DTMA → «Открыть в Telegram»).\n" +
+                    "3) Другая сеть / SIM, где probe > 0.\n\n" +
+                    "Если есть сервер:\n" +
+                    "• Upstream SOCKS5 в DTMA, или MTProto на своём VPS.\n" +
                     "3) Другая сеть (мобильный интернет / Wi‑Fi), где probe > 0.\n\n" +
                     "Это не баг dataplane: example.com ходит, DC Telegram — нет.",
             )

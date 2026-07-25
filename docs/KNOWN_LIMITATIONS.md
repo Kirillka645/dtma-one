@@ -12,8 +12,10 @@
 ## Telegram specifically
 
 - Client often uses **hardcoded DC IPs** — DNS/PAER does not apply.
-- Probe all DC timeouts ⇒ ISP-level block/null-route; local VPN cannot invent routes.
-- Workarounds: **Settings → upstream SOCKS5**, Telegram MTProto proxy, or network where probe > 0.
+- Probe all DC timeouts on **one** network ⇒ try **multipath** (Wi‑Fi + LTE): DTMA binds Telegram DC sockets to the other underlying network (no SOCKS5).
+- Probe 0/N on **all** paths ⇒ no pure-local fix; need MTProto / user SOCKS5 / other network / VPS.
+- Workarounds without SOCKS5: multipath, official **MTProto** (`tg://proxy`), dual-SIM / other ISP.
+- With infrastructure: **Settings → upstream SOCKS5** or self-hosted MTProto.
 
 ## Built-in HTTPS test
 

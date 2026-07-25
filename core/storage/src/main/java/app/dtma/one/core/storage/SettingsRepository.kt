@@ -34,6 +34,15 @@ data class UserSettings(
     val dismissedUpdateTag: String = "",
     val lastKnownUpdateTag: String = "",
     val lastKnownUpdateUrl: String = "",
+    /**
+     * For Telegram DC IPs: try alternate underlying network (e.g. cellular vs Wi‑Fi)
+     * before default path. No remote proxy / SOCKS5 required when only one path is blocked.
+     */
+    val telegramMultipath: Boolean = true,
+    /** Optional MTProto proxy for Telegram client deep-link (not used by DTMA tunnel). */
+    val mtprotoHost: String = "",
+    val mtprotoPort: Int = 443,
+    val mtprotoSecret: String = "",
 ) {
     fun toRaceConfig(): RaceConfig = RaceConfig(
         width = raceWidth,
@@ -65,6 +74,10 @@ class SettingsRepository(private val context: Context) {
         val dismissedUpdate = stringPreferencesKey("dismissed_update")
         val knownUpdateTag = stringPreferencesKey("known_update_tag")
         val knownUpdateUrl = stringPreferencesKey("known_update_url")
+        val tgMultipath = booleanPreferencesKey("tg_multipath")
+        val mtprotoHost = stringPreferencesKey("mtproto_host")
+        val mtprotoPort = intPreferencesKey("mtproto_port")
+        val mtprotoSecret = stringPreferencesKey("mtproto_secret")
     }
 
     val settings: Flow<UserSettings> = context.dataStore.data.map { p ->
@@ -119,6 +132,10 @@ class SettingsRepository(private val context: Context) {
             dismissedUpdateTag = p[Keys.dismissedUpdate].orEmpty(),
             lastKnownUpdateTag = p[Keys.knownUpdateTag].orEmpty(),
             lastKnownUpdateUrl = p[Keys.knownUpdateUrl].orEmpty(),
+            telegramMultipath = p[Keys.tgMultipath] ?: true,
+            mtprotoHost = p[Keys.mtprotoHost].orEmpty(),
+            mtprotoPort = p[Keys.mtprotoPort] ?: 443,
+            mtprotoSecret = p[Keys.mtprotoSecret].orEmpty(),
         )
 
     private fun write(
@@ -141,5 +158,9 @@ class SettingsRepository(private val context: Context) {
         prefs[Keys.dismissedUpdate] = next.dismissedUpdateTag
         prefs[Keys.knownUpdateTag] = next.lastKnownUpdateTag
         prefs[Keys.knownUpdateUrl] = next.lastKnownUpdateUrl
+        prefs[Keys.tgMultipath] = next.telegramMultipath
+        prefs[Keys.mtprotoHost] = next.mtprotoHost.trim()
+        prefs[Keys.mtprotoPort] = next.mtprotoPort.coerceIn(1, 65535)
+        prefs[Keys.mtprotoSecret] = next.mtprotoSecret.trim()
     }
 }
