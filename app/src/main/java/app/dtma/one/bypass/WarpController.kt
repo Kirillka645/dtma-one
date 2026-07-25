@@ -36,11 +36,12 @@ import kotlinx.coroutines.withContext
  */
 object WarpController {
     private const val TAG = "DtmaWarp"
-    /** Full start cycles (new Cloudflare account each fail). Keep small — user hates long waits. */
+    /** Full start cycles. Keep small — user hates long waits. */
     private const val MAX_AUTO_REGEN = 2
     private const val HEALTH_INTERVAL_MS = 3_000L
     private const val STALL_MS = 25_000L
-    private const val HANDSHAKE_WAIT_MS = 1_000L
+    /** Slightly longer: LTE + multi-port engage needs ~1.5–2s per endpoint. */
+    private const val HANDSHAKE_WAIT_MS = 1_800L
     private const val HANDSHAKE_POLL_MS = 200L
 
     private val mutex = Mutex()
@@ -190,9 +191,9 @@ object WarpController {
                 "DNS: api.cloudflareclient.com. LTE/другой Wi‑Fi / вставьте conf"
             m.contains("Таймаут Cloudflare API", true) ||
                 m.contains("timeout", true) || m.contains("timed out", true) ->
-                "Таймаут CF API (reg режется). LTE / вставьте conf / 1.1.1.1 app"
+                "CF API недоступен. Пробуем bootstrap; иначе вставьте conf"
             m.contains("handshake", true) || m.contains("rx=0", true) ->
-                "UDP CF (2408) не проходит. LTE / 1.1.1.1 app"
+                "UDP CF режется (порты 2408/443/…). Другой оператор / 1.1.1.1"
             m.contains("HTTP", true) -> m.take(80)
             else -> m.take(160)
         }
@@ -221,19 +222,35 @@ object WarpController {
     private suspend fun bringUpOnce(app: Context, attempt: Int, allowRegister: Boolean) {
         publish(
             mode = WarpMode.STARTING,
-            message = if (confCache != null) {
-                "WARP: сохранённый conf…"
-            } else {
-                "WARP: регистрация Cloudflare…"
+            message = when {
+                confCache != null -> "WARP: conf ${confCache?.source ?: ""}…"
+                else -> "WARP: API / bootstrap…"
             },
             attempts = attempt,
         )
-        val generated = confCache ?: run {
-            if (!allowRegister) error("Нет conf и регистрация запрещена")
-            WarpConfigGenerator.generate(app).also {
-                confCache = it
-                WarpInstaller.savePersistentConf(app, it.confText)
+
+        // Try cached, then live API + asset bootstrap, then remaining bootstrap slots
+        val candidates = ArrayList<WarpConfigGenerator.Result>()
+        confCache?.let { candidates += WarpConfigGenerator.expandEndpoints(it) }
+        if (allowRegister && candidates.isEmpty()) {
+            try {
+                val gen = WarpConfigGenerator.generateOrBootstrap(app)
+                candidates += gen
+            } catch (e: Exception) {
+                Log.w(TAG, "generateOrBootstrap: ${e.message}")
             }
+        }
+        if (candidates.isEmpty() && allowRegister) {
+            candidates += WarpConfigGenerator.loadAllBootstrap(app)
+        }
+        if (candidates.isEmpty() && !allowRegister) {
+            error("Нет conf")
+        }
+        if (candidates.isEmpty()) {
+            error(
+                "Нет conf: API недоступен и bootstrap пуст. " +
+                    "Вставьте WireGuard conf из буфера.",
+            )
         }
 
         ContextCompat.startForegroundService(
@@ -249,74 +266,89 @@ object WarpController {
         delay(100)
 
         val be = backend ?: GoBackend(app).also { backend = it }
-        val endpoints = generated.endpointCandidates.ifEmpty { listOf(generated.endpoint) }.take(3)
         var lastTx = 0L
-        var lastEp = generated.endpoint
+        var lastEp = "?"
+        var lastSource = ""
 
-        for ((idx, ep) in endpoints.withIndex()) {
-            lastEp = ep
-            val variant = WarpConfigGenerator.withEndpoint(generated, ep)
-            val config = Config.parse(
-                ByteArrayInputStream(variant.confText.toByteArray(Charsets.UTF_8)),
-            )
-            try {
-                be.setState(WarpTunnel, Tunnel.State.DOWN, null)
-            } catch (_: Exception) {
-            }
-
+        for ((cIdx, base0) in candidates.withIndex()) {
+            val base = WarpConfigGenerator.expandEndpoints(base0)
+            lastSource = base.source
+            val endpoints = base.endpointCandidates.ifEmpty { listOf(base.endpoint) }.take(8)
             publish(
                 mode = WarpMode.STARTING,
-                message = "WARP: $ep (${idx + 1}/${endpoints.size})",
-                endpoint = ep,
-                address = generated.addressV4,
+                message = "WARP: ${base.source} · ${endpoints.size} ep…",
+                address = base.addressV4,
                 attempts = attempt,
             )
-            be.setState(WarpTunnel, Tunnel.State.UP, config)
 
-            val deadline = System.currentTimeMillis() + HANDSHAKE_WAIT_MS
-            var rx = 0L
-            var tx = 0L
-            while (System.currentTimeMillis() < deadline) {
-                delay(HANDSHAKE_POLL_MS)
+            for ((idx, ep) in endpoints.withIndex()) {
+                lastEp = ep
+                val variant = WarpConfigGenerator.withEndpoint(base, ep)
+                val config = Config.parse(
+                    ByteArrayInputStream(variant.confText.toByteArray(Charsets.UTF_8)),
+                )
                 try {
-                    val s = be.getStatistics(WarpTunnel)
-                    rx = s.totalRx()
-                    tx = s.totalTx()
-                    lastTx = tx
-                    if (rx > 0) {
-                        lastRx = rx
-                        lastRxChangeAt = System.currentTimeMillis()
-                        confCache = variant
-                        WarpInstaller.savePersistentConf(app, variant.confText)
-                        publish(
-                            mode = WarpMode.ON,
-                            message = "WARP ВКЛ · $ep",
-                            endpoint = ep,
-                            address = generated.addressV4,
-                            rx = rx,
-                            tx = tx,
-                            attempts = attempt,
-                        )
-                        VpnStateHolder.set(
-                            VpnRuntimeStatus(
-                                state = VpnUiState.ACTIVE,
-                                message = "WARP ВКЛ · $ep · ↓${WarpLiveStatus.formatBytes(rx)}",
-                                ipv4 = true,
-                                ipv6 = false,
-                                limitedMode = false,
-                            ),
-                        )
-                        Log.i(TAG, "WARP ON ep=$ep rx=$rx")
-                        return
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "stats: ${e.message}")
+                    be.setState(WarpTunnel, Tunnel.State.DOWN, null)
+                } catch (_: Exception) {
                 }
+
+                publish(
+                    mode = WarpMode.STARTING,
+                    message = "WARP: $ep (${idx + 1}/${endpoints.size}, conf ${cIdx + 1}/${candidates.size})",
+                    endpoint = ep,
+                    address = base.addressV4,
+                    attempts = attempt,
+                )
+                be.setState(WarpTunnel, Tunnel.State.UP, config)
+
+                val deadline = System.currentTimeMillis() + HANDSHAKE_WAIT_MS
+                var rx = 0L
+                var tx = 0L
+                while (System.currentTimeMillis() < deadline) {
+                    delay(HANDSHAKE_POLL_MS)
+                    try {
+                        val s = be.getStatistics(WarpTunnel)
+                        rx = s.totalRx()
+                        tx = s.totalTx()
+                        lastTx = tx
+                        if (rx > 0) {
+                            lastRx = rx
+                            lastRxChangeAt = System.currentTimeMillis()
+                            confCache = variant
+                            WarpInstaller.savePersistentConf(app, variant.confText)
+                            publish(
+                                mode = WarpMode.ON,
+                                message = "WARP ВКЛ · $ep · ${variant.source}",
+                                endpoint = ep,
+                                address = base.addressV4,
+                                rx = rx,
+                                tx = tx,
+                                attempts = attempt,
+                            )
+                            VpnStateHolder.set(
+                                VpnRuntimeStatus(
+                                    state = VpnUiState.ACTIVE,
+                                    message = "WARP ВКЛ · $ep · ↓${WarpLiveStatus.formatBytes(rx)}",
+                                    ipv4 = true,
+                                    ipv6 = false,
+                                    limitedMode = false,
+                                ),
+                            )
+                            Log.i(TAG, "WARP ON ep=$ep rx=$rx src=${variant.source}")
+                            return
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "stats: ${e.message}")
+                    }
+                }
+                Log.w(TAG, "no handshake $ep tx=$tx src=${base.source}")
             }
-            Log.w(TAG, "no handshake $ep tx=$tx")
         }
 
-        error("handshake fail (tx=$lastTx last=$lastEp)")
+        error(
+            "handshake fail (tx=$lastTx last=$lastEp src=$lastSource). " +
+                "UDP к Cloudflare (2408/443/…) режется на этом LTE.",
+        )
     }
 
     private fun startMonitor(app: Context) {

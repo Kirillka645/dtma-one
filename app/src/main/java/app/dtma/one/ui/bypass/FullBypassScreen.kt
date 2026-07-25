@@ -263,11 +263,11 @@ fun FullBypassScreen() {
         }
 
         Text(
-            text = "• DNS bootstrap + DoH + multi-IP race\n" +
-                "• TCP/443 pre-probe + Wi‑Fi/LTE race + HTTP/1.1\n" +
-                "• Conf сохраняется — после 1 успеха API не нужен\n" +
-                "• Импорт conf из буфера если API заблокирован\n" +
-                "• Handshake ≤3 endpoint (2408/443/500)",
+            text = "• API: multi-IP + порты 443/8443/2053… + Wi‑Fi/LTE\n" +
+                "• Если API мёртв — bootstrap conf из приложения\n" +
+                "• Handshake: engage IP × порты 2408/443/500/8443…\n" +
+                "• Conf сохраняется после успеха\n" +
+                "• «Вставить conf» — свой WireGuard conf без API",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

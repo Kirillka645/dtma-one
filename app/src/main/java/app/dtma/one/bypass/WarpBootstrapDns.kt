@@ -40,14 +40,18 @@ object WarpBootstrapDns : Dns {
 
     init {
         staticHints["api.cloudflareclient.com"] = listOf(
+            "104.16.192.82",
+            "104.16.24.84",
             "104.16.132.229",
             "104.16.133.229",
             "104.18.25.176",
             "104.18.24.176",
             "104.19.192.29",
             "104.19.193.29",
-            "104.16.124.96",
-            "104.16.125.96",
+        )
+        staticHints["api.devices.cloudflare.com"] = listOf(
+            "162.159.137.105",
+            "162.159.138.105",
         )
         staticHints["engage.cloudflareclient.com"] = listOf(
             "162.159.192.1",
