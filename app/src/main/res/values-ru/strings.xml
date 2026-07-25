@@ -21,4 +21,20 @@
     <string name="system_mode_label">Общесистемный транспорт (VpnService)</string>
     <string name="builtin_tls_label">Встроенный HTTPS-тест (полная TLS-валидация DTMA One)</string>
     <string name="no_cert_claim">Сертификаты сторонних приложений DTMA One не проверяет.</string>
+    <string name="update_notification_channel">Обновления</string>
+    <string name="update_notification_channel_desc">Уведомление, когда на GitHub выходит новая версия DTMA One</string>
+    <string name="update_notification_title">Доступно обновление</string>
+    <string name="update_notification_text">DTMA One %1$s уже на GitHub. Нажмите, чтобы открыть страницу релиза.</string>
+    <string name="update_notification_open">Открыть релиз</string>
+    <string name="update_notification_app">Открыть приложение</string>
+    <string name="update_banner_title">Обновление: %1$s</string>
+    <string name="update_banner_body">На GitHub есть более новая версия. Скачайте APK со страницы релиза.</string>
+    <string name="update_banner_open">Открыть релиз</string>
+    <string name="update_banner_dismiss">Позже</string>
+    <string name="update_check_setting">Проверять обновления</string>
+    <string name="update_check_setting_hint">GitHub Releases API, без аналитики</string>
+    <string name="update_check_now">Проверить обновления</string>
+    <string name="update_checking">Проверка…</string>
+    <string name="update_up_to_date">У вас актуальная версия</string>
+    <string name="update_check_error">Не удалось проверить: %1$s</string>
 </resources>

@@ -28,6 +28,12 @@ data class UserSettings(
     val upstreamSocksHost: String = "",
     val upstreamSocksPort: Int = 1080,
     val upstreamSocksEnabled: Boolean = false,
+    /** Check GitHub Releases for new versions (notification + in-app banner). */
+    val updateCheckEnabled: Boolean = true,
+    val lastUpdateCheckMs: Long = 0L,
+    val dismissedUpdateTag: String = "",
+    val lastKnownUpdateTag: String = "",
+    val lastKnownUpdateUrl: String = "",
 ) {
     fun toRaceConfig(): RaceConfig = RaceConfig(
         width = raceWidth,
@@ -54,9 +60,47 @@ class SettingsRepository(private val context: Context) {
         val upSocksHost = stringPreferencesKey("up_socks_host")
         val upSocksPort = intPreferencesKey("up_socks_port")
         val upSocksEn = booleanPreferencesKey("up_socks_en")
+        val updateCheck = booleanPreferencesKey("update_check")
+        val lastUpdateCheck = longPreferencesKey("last_update_check")
+        val dismissedUpdate = stringPreferencesKey("dismissed_update")
+        val knownUpdateTag = stringPreferencesKey("known_update_tag")
+        val knownUpdateUrl = stringPreferencesKey("known_update_url")
     }
 
     val settings: Flow<UserSettings> = context.dataStore.data.map { p ->
+        read(p)
+    }
+
+    suspend fun update(transform: (UserSettings) -> UserSettings) {
+        context.dataStore.edit { prefs ->
+            val next = transform(read(prefs))
+            write(prefs, next)
+        }
+    }
+
+    suspend fun markUpdateChecked(nowMs: Long) {
+        context.dataStore.edit { it[Keys.lastUpdateCheck] = nowMs }
+    }
+
+    suspend fun setKnownUpdate(tag: String, url: String) {
+        context.dataStore.edit {
+            it[Keys.knownUpdateTag] = tag
+            it[Keys.knownUpdateUrl] = url
+        }
+    }
+
+    suspend fun clearKnownUpdate() {
+        context.dataStore.edit {
+            it[Keys.knownUpdateTag] = ""
+            it[Keys.knownUpdateUrl] = ""
+        }
+    }
+
+    suspend fun dismissUpdate(tag: String) {
+        context.dataStore.edit { it[Keys.dismissedUpdate] = tag }
+    }
+
+    private fun read(p: androidx.datastore.preferences.core.Preferences): UserSettings =
         UserSettings(
             raceWidth = p[Keys.raceWidth] ?: PaerLimits.DEFAULT_SIMULTANEOUS_CANDIDATES,
             secondDelayMs = p[Keys.secondDelay] ?: 250L,
@@ -70,37 +114,32 @@ class SettingsRepository(private val context: Context) {
             upstreamSocksHost = p[Keys.upSocksHost].orEmpty(),
             upstreamSocksPort = p[Keys.upSocksPort] ?: 1080,
             upstreamSocksEnabled = p[Keys.upSocksEn] ?: false,
+            updateCheckEnabled = p[Keys.updateCheck] ?: true,
+            lastUpdateCheckMs = p[Keys.lastUpdateCheck] ?: 0L,
+            dismissedUpdateTag = p[Keys.dismissedUpdate].orEmpty(),
+            lastKnownUpdateTag = p[Keys.knownUpdateTag].orEmpty(),
+            lastKnownUpdateUrl = p[Keys.knownUpdateUrl].orEmpty(),
         )
-    }
 
-    suspend fun update(transform: (UserSettings) -> UserSettings) {
-        context.dataStore.edit { prefs ->
-            val current = UserSettings(
-                raceWidth = prefs[Keys.raceWidth] ?: PaerLimits.DEFAULT_SIMULTANEOUS_CANDIDATES,
-                secondDelayMs = prefs[Keys.secondDelay] ?: 250L,
-                thirdDelayMs = prefs[Keys.thirdDelay] ?: 750L,
-                batterySaver = prefs[Keys.batterySaver] ?: false,
-                rvecHalfLifeHours = prefs[Keys.halfLife]?.toDoubleOrNull()
-                    ?: ScoringWeights.DEFAULT_CACHE_HALF_LIFE_HOURS,
-                localLogsEnabled = prefs[Keys.localLogs] ?: false,
-                rememberTestUrl = prefs[Keys.rememberUrl] ?: false,
-                lastTestUrl = prefs[Keys.lastUrl] ?: "https://example.com/",
-                upstreamSocksHost = prefs[Keys.upSocksHost].orEmpty(),
-                upstreamSocksPort = prefs[Keys.upSocksPort] ?: 1080,
-                upstreamSocksEnabled = prefs[Keys.upSocksEn] ?: false,
-            )
-            val next = transform(current)
-            prefs[Keys.raceWidth] = next.raceWidth.coerceIn(1, 3)
-            prefs[Keys.secondDelay] = next.secondDelayMs
-            prefs[Keys.thirdDelay] = next.thirdDelayMs
-            prefs[Keys.batterySaver] = next.batterySaver
-            prefs[Keys.halfLife] = next.rvecHalfLifeHours.toString()
-            prefs[Keys.localLogs] = next.localLogsEnabled
-            prefs[Keys.rememberUrl] = next.rememberTestUrl
-            prefs[Keys.lastUrl] = if (next.rememberTestUrl) next.lastTestUrl else ""
-            prefs[Keys.upSocksHost] = next.upstreamSocksHost.trim()
-            prefs[Keys.upSocksPort] = next.upstreamSocksPort.coerceIn(1, 65535)
-            prefs[Keys.upSocksEn] = next.upstreamSocksEnabled
-        }
+    private fun write(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        next: UserSettings,
+    ) {
+        prefs[Keys.raceWidth] = next.raceWidth.coerceIn(1, 3)
+        prefs[Keys.secondDelay] = next.secondDelayMs
+        prefs[Keys.thirdDelay] = next.thirdDelayMs
+        prefs[Keys.batterySaver] = next.batterySaver
+        prefs[Keys.halfLife] = next.rvecHalfLifeHours.toString()
+        prefs[Keys.localLogs] = next.localLogsEnabled
+        prefs[Keys.rememberUrl] = next.rememberTestUrl
+        prefs[Keys.lastUrl] = if (next.rememberTestUrl) next.lastTestUrl else ""
+        prefs[Keys.upSocksHost] = next.upstreamSocksHost.trim()
+        prefs[Keys.upSocksPort] = next.upstreamSocksPort.coerceIn(1, 65535)
+        prefs[Keys.upSocksEn] = next.upstreamSocksEnabled
+        prefs[Keys.updateCheck] = next.updateCheckEnabled
+        prefs[Keys.lastUpdateCheck] = next.lastUpdateCheckMs
+        prefs[Keys.dismissedUpdate] = next.dismissedUpdateTag
+        prefs[Keys.knownUpdateTag] = next.lastKnownUpdateTag
+        prefs[Keys.knownUpdateUrl] = next.lastKnownUpdateUrl
     }
 }

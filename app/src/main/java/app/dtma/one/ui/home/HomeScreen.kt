@@ -1,7 +1,10 @@
 package app.dtma.one.ui.home
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,21 +18,30 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.dtma.one.R
 import app.dtma.one.core.model.VpnUiState
+import app.dtma.one.update.UpdateCheckState
+import app.dtma.one.update.UpdateNotifier
 import app.dtma.one.vpn.VpnStateHolder
+import kotlinx.coroutines.launch
 
 @Composable
 fun HomeScreen(onToggleVpn: (Boolean) -> Unit) {
     val status by VpnStateHolder.status.collectAsStateWithLifecycle()
+    val updateState by UpdateNotifier.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val active = status.state == VpnUiState.ACTIVE ||
         status.state == VpnUiState.LIMITED ||
         status.state == VpnUiState.UNSTABLE ||
@@ -59,6 +71,48 @@ fun HomeScreen(onToggleVpn: (Boolean) -> Unit) {
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        if (updateState is UpdateCheckState.Available) {
+            val update = (updateState as UpdateCheckState.Available).update
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.update_banner_title, update.versionName),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        text = stringResource(R.string.update_banner_body),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(update.releaseUrl)),
+                                )
+                            },
+                        ) {
+                            Text(stringResource(R.string.update_banner_open))
+                        }
+                        TextButton(
+                            onClick = {
+                                scope.launch { UpdateNotifier.dismiss(context) }
+                            },
+                        ) {
+                            Text(stringResource(R.string.update_banner_dismiss))
+                        }
+                    }
+                }
+            }
+        }
 
         Card(
             modifier = Modifier.fillMaxWidth(),

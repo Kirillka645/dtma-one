@@ -100,6 +100,18 @@ fun SettingsScreen() {
                 }
             },
         )
+        RowSwitch(
+            title = "Check for updates (GitHub)",
+            checked = settings.updateCheckEnabled,
+            onChecked = { v ->
+                scope.launch {
+                    DtmaApp.instance.settingsRepository.update { it.copy(updateCheckEnabled = v) }
+                    if (v) {
+                        app.dtma.one.update.UpdateNotifier.check(context, force = true)
+                    }
+                }
+            },
+        )
 
         Text("Обход блокировок Telegram", style = MaterialTheme.typography.titleMedium)
         Text(

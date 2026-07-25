@@ -21,4 +21,20 @@
     <string name="system_mode_label">System-wide transport (VpnService)</string>
     <string name="builtin_tls_label">Built-in HTTPS test (full TLS validation by DTMA One)</string>
     <string name="no_cert_claim">Certificates of third-party apps are not validated by DTMA One.</string>
+    <string name="update_notification_channel">Updates</string>
+    <string name="update_notification_channel_desc">Notifies when a new DTMA One release is available on GitHub</string>
+    <string name="update_notification_title">Update available</string>
+    <string name="update_notification_text">DTMA One %1$s is available. Tap to open the release page.</string>
+    <string name="update_notification_open">Open release</string>
+    <string name="update_notification_app">Open app</string>
+    <string name="update_banner_title">Update available: %1$s</string>
+    <string name="update_banner_body">A newer version is on GitHub. Download the APK from the release page.</string>
+    <string name="update_banner_open">Open release</string>
+    <string name="update_banner_dismiss">Later</string>
+    <string name="update_check_setting">Check for updates</string>
+    <string name="update_check_setting_hint">Uses GitHub Releases API (no analytics)</string>
+    <string name="update_check_now">Check for updates now</string>
+    <string name="update_checking">Checking…</string>
+    <string name="update_up_to_date">You have the latest version</string>
+    <string name="update_check_error">Could not check for updates: %1$s</string>
 </resources>
