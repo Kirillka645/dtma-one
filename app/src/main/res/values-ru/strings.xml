@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DTMA One</string>
+    <string name="vpn_notification_channel">DTMA VPN</string>
+    <string name="vpn_notification_title">DTMA One активен</string>
+    <string name="vpn_notification_text">Локальный VPN с PAER. Без удалённого сервера.</string>
+    <string name="vpn_notification_stop">Выключить</string>
+    <string name="state_off">Выключено</string>
+    <string name="state_starting">Запуск</string>
+    <string name="state_active">Активно</string>
+    <string name="state_limited">Ограниченный режим</string>
+    <string name="state_unstable">Сеть нестабильна</string>
+    <string name="state_error">Ошибка</string>
+    <string name="btn_enable">Включить</string>
+    <string name="btn_disable">Выключить</string>
+    <string name="nav_home">Состояние</string>
+    <string name="nav_test">Проверка</string>
+    <string name="nav_settings">Настройки</string>
+    <string name="nav_about">О приложении</string>
+    <string name="disclaimer_short">Не гарантирует обход блокировок. Помогает только при наличии достижимого легитимного endpoint.</string>
+    <string name="system_mode_label">Общесистемный транспорт (VpnService)</string>
+    <string name="builtin_tls_label">Встроенный HTTPS-тест (полная TLS-валидация DTMA One)</string>
+    <string name="no_cert_claim">Сертификаты сторонних приложений DTMA One не проверяет.</string>
+</resources>
