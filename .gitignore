@@ -23,3 +23,7 @@ out/
 *.jks
 !debug.keystore
 .kotlin/
+
+native/
+*.zip
+

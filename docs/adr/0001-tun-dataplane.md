@@ -1,29 +1,31 @@
-# ADR-0001: Pure-Kotlin userspace TUN dataplane
+# ADR-0001: hev-socks5-tunnel + local SOCKS5 dataplane
 
 ## Status
 
-Accepted (MVP)
+Accepted (v0.2.0)
 
 ## Context
 
-System-wide mode requires real packet forwarding between TUN and the physical network with `VpnService.protect()`. Opaque prebuilt `.so` without reproducible sources is forbidden.
+System-wide mode requires real packet forwarding between TUN and the physical network with `VpnService.protect()`. A pure-Kotlin toy TCP stack failed real apps (browsers, Telegram).
 
 ## Decision
 
-Implement a pure-Kotlin userspace relay:
+Use reproducible open-source **hev-socks5-tunnel** (MIT, lwIP userspace stack) built from source via NDK:
 
-- Parse IPv4 (primary) / IPv6 (partial)
-- TCP and UDP forwarding via NIO channels
-- DNS handled in-process for PAER ordering
-- Apache-2.0, fully in-repo, no NDK binary blob
+1. `VpnService.Builder.establish()` provides TUN fd  
+2. **hev-socks5-tunnel** runs tun2socks on that fd  
+3. **LocalSocks5Server** (in-process) accepts hev connections on `127.0.0.1`  
+4. All SOCKS5 egress sockets call `VpnService.protect()` / app is disallowed from VPN  
+
+No remote proxy of the project authors. Sources live under `app/src/main/jni/` (vendored hev-socks5-tunnel tree).
 
 ## Alternatives considered
 
-1. **hev-socks5-tunnel** — solid, but needs NDK packaging and careful license/ABI pinning.
-2. **libv2ray / commercial stacks** — heavy, remote-proxy oriented, not aligned with local-only PAER.
+1. Pure-Kotlin TCP/IP — insufficient for production app traffic (0.1.x).  
+2. libv2ray — heavier, remote-proxy oriented.  
 
 ## Consequences
 
-- Full control and auditability.
-- Simplified TCP state machine may not handle every edge protocol.
-- Browser HTTPS over IPv4 is the primary success path for MVP.
+- Reliable TCP/UDP for system apps (HTTPS, Telegram MTProto).  
+- NDK required for build.  
+- IPv6 capture deferred until dual-stack validation.

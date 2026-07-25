@@ -13,26 +13,21 @@ import app.dtma.one.MainActivity
 import app.dtma.one.R
 import app.dtma.one.core.model.VpnUiState
 import app.dtma.one.core.network.NetworkContextFactory
-import app.dtma.one.core.network.dns.ProtectedDnsClient
-import app.dtma.one.core.network.tun.DnsSessionCache
-import app.dtma.one.core.network.tun.SimpleDnsServer
-import app.dtma.one.core.network.tun.TunDataplane
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.runBlocking
+import java.io.File
 
 /**
- * Local-only VpnService. No remote VPN server, proxy, or developer infrastructure.
- * Establishes TUN and runs real userspace dataplane with protect().
+ * Local-only VpnService using:
+ * 1) TUN from [Builder.establish]
+ * 2) hev-socks5-tunnel (lwIP userspace stack) as tun2socks
+ * 3) [LocalSocks5Server] with [protect] for real outbound sockets
+ *
+ * No remote VPN/proxy infrastructure of the project authors.
  */
 class DtmaVpnService : VpnService() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var tun: ParcelFileDescriptor? = null
-    private var dataplane: TunDataplane? = null
-    private val sessionCache = DnsSessionCache()
+    private var socks5: LocalSocks5Server? = null
+    private var hevRunning = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -46,41 +41,45 @@ class DtmaVpnService : VpnService() {
     }
 
     private fun startVpn() {
-        if (dataplane != null) return
+        if (hevRunning || tun != null) return
+
         VpnStateHolder.update {
-            it.copy(state = VpnUiState.STARTING, message = "Establishing TUN…")
+            it.copy(state = VpnUiState.STARTING, message = "Starting local tunnel…")
         }
         startForeground(NOTIFICATION_ID, buildNotification())
 
         try {
+            if (!HevTunnel.available) {
+                throw IllegalStateException(
+                    "Native tun2socks library not loaded (hev-socks5-tunnel). Rebuild with NDK.",
+                )
+            }
+
             val networkContext = NetworkContextFactory.current(this)
-            // IPv4-only VPN path for MVP.
-            // Claiming IPv6 (::/0) without a working IPv6 userspace stack black-holes apps
-            // that prefer AAAA (Telegram often does). Leave IPv6 on the physical network.
+
+            // Local SOCKS5 first (outbound with protect / app-disallow).
+            val socks = LocalSocks5Server(this, bindPort = 18080)
+            socks.start()
+            socks5 = socks
+            val socksPort = socks.listenPort
+
             val builder = Builder()
                 .setSession("DTMA One")
                 .setMtu(1500)
-                // /24 so 10.0.0.1 (VPN DNS) is on-link with our TUN address.
-                .addAddress("10.0.0.2", 24)
-                .addDnsServer("10.0.0.1")
+                .addAddress("10.0.0.2", 30)
+                .addDnsServer("1.1.1.1")
+                .addDnsServer("8.8.8.8")
                 .addRoute("0.0.0.0", 0)
 
-            val ipv6Enabled = false
-
+            // Do not claim IPv6 until dual-stack is validated end-to-end.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
             }
-            // Blocking TUN fd: reader thread blocks until packets arrive.
-            builder.setBlocking(true)
-
-            // Do not allow apps to bypass VPN when the platform supports it.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    // Prefer all apps through VPN; no per-app disallow list in MVP.
-                    builder.addDisallowedApplication(packageName)
-                } catch (e: Exception) {
-                    Log.w(TAG, "addDisallowedApplication self: ${e.message}")
-                }
+            // Exclude ourselves so SOCKS5 + hev control sockets never re-enter TUN.
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {
+                Log.w(TAG, "disallow self: ${e.message}")
             }
 
             val pfd = builder.establish()
@@ -88,59 +87,37 @@ class DtmaVpnService : VpnService() {
                 VpnStateHolder.update {
                     it.copy(
                         state = VpnUiState.ERROR,
-                        message = "VPN permission revoked or establish() failed",
+                        message = "VPN permission missing or establish() failed",
                     )
                 }
+                socks.stop()
+                socks5 = null
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return
             }
             tun = pfd
 
-            val dns = SimpleDnsServer(
-                sessionCache = sessionCache,
-                networkContextId = networkContext.id,
-                protectedDns = ProtectedDnsClient(vpnService = this),
-                rvecProvider = { host ->
-                    runBlocking {
-                        DtmaApp.instance.rvecStore.listForHost(host)
-                    }
-                },
-                onResolved = { host, candidates ->
-                    Log.d(TAG, "DNS $host -> ${candidates.map { it.ipAddress }}")
-                },
-            )
+            val configFile = writeHevConfig(socksPort)
+            val fd = pfd.fd
+            Log.i(TAG, "Starting hev tun2socks fd=$fd socks=127.0.0.1:$socksPort cfg=${configFile.absolutePath}")
 
-            val plane = TunDataplane(
-                vpnService = this,
-                tunInterface = pfd,
-                dnsServer = dns,
-                sessionCache = sessionCache,
-                selectDestination = { hostname, originalIp, _ ->
-                    // Transparent remap only when hostname known from managed DNS.
-                    if (hostname == null) return@TunDataplane originalIp
-                    val preferred = sessionCache.ipsForHost(hostname).firstOrNull()
-                    preferred ?: originalIp
-                },
-            )
-            plane.onFlowCountChanged = { count ->
-                VpnStateHolder.update { it.copy(flowCount = count) }
-            }
-            plane.start()
-            dataplane = plane
+            // Blocks in native thread inside hev; returns immediately from JNI after spawn.
+            HevTunnel.TProxyStartService(configFile.absolutePath, fd)
+            hevRunning = true
 
             VpnStateHolder.set(
                 VpnRuntimeStatus(
-                    state = if (ipv6Enabled) VpnUiState.ACTIVE else VpnUiState.ACTIVE,
-                    message = "Local dataplane: IPv4 TCP/UDP/DNS + protect(). IPv6 not captured (avoids black-hole).",
+                    state = VpnUiState.ACTIVE,
+                    message = "Local tun2socks (hev+SOCKS5). No remote server. IPv4.",
                     flowCount = 0,
                     networkContext = networkContext,
                     ipv4 = true,
-                    ipv6 = ipv6Enabled,
+                    ipv6 = false,
                     limitedMode = false,
                 ),
             )
-            Log.i(TAG, "VPN started")
+            Log.i(TAG, "VPN started (hev)")
         } catch (e: Exception) {
             Log.e(TAG, "start failed", e)
             VpnStateHolder.update {
@@ -150,10 +127,43 @@ class DtmaVpnService : VpnService() {
         }
     }
 
+    private fun writeHevConfig(socksPort: Int): File {
+        val f = File(filesDir, "hev-config.yml")
+        // hev owns the TUN stack; socks5 is our protect()'d egress.
+        val yaml = """
+            |tunnel:
+            |  mtu: 1500
+            |  multi-queue: false
+            |  ipv4: 10.0.0.2
+            |socks5:
+            |  port: $socksPort
+            |  address: 127.0.0.1
+            |  udp: 'udp'
+            |misc:
+            |  log-level: warn
+            |  connect-timeout: 10000
+            |  tcp-read-write-timeout: 300000
+            |  udp-read-write-timeout: 60000
+            |
+        """.trimMargin()
+        f.writeText(yaml)
+        return f
+    }
+
     private fun stopVpn() {
-        dataplane?.stop()
-        dataplane = null
-        sessionCache.clear()
+        try {
+            if (hevRunning && HevTunnel.available) {
+                HevTunnel.TProxyStopService()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "hev stop: ${e.message}")
+        }
+        hevRunning = false
+        try {
+            socks5?.stop()
+        } catch (_: Exception) {
+        }
+        socks5 = null
         try {
             tun?.close()
         } catch (_: Exception) {
@@ -171,8 +181,7 @@ class DtmaVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        scope.cancel()
-        dataplane?.stop()
+        if (hevRunning || tun != null) stopVpn()
         super.onDestroy()
     }
 

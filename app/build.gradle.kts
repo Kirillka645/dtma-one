@@ -7,16 +7,31 @@ plugins {
 android {
     namespace = "app.dtma.one"
     compileSdk = 35
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "app.dtma.one"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GIT_SHA", "\"dev\"")
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/Kirillka645/dtma-one\"")
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        }
+        externalNativeBuild {
+            ndkBuild {
+                arguments += listOf("APP_PLATFORM=android-26")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path = file("src/main/jni/Android.mk")
+        }
     }
 
     buildTypes {
