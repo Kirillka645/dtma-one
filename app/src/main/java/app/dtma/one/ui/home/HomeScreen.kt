@@ -87,15 +87,15 @@ fun HomeScreen(
             ) {
                 Text("TG + YouTube мертвы у провайдера?", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Локальный DTMA не создаст маршрут. Нужен free WARP (Cloudflare) " +
-                        "через WireGuard — вкладка «Чтобы работало».",
+                    "Локальный режим не создаст маршрут. В DTMA есть встроенный " +
+                        "Cloudflare WARP (без приложения WireGuard) — вкладка «Чтобы работало».",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Button(
                     onClick = onOpenBypass,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Сделать чтобы работало (WARP)")
+                    Text("WARP внутри DTMA")
                 }
             }
         }

@@ -1,7 +1,11 @@
 package app.dtma.one.ui.bypass
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.net.VpnService
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,17 +27,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import app.dtma.one.bypass.WarpConfigGenerator
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.dtma.one.R
+import app.dtma.one.bypass.WarpController
 import app.dtma.one.bypass.WarpInstaller
-import java.io.File
-import kotlinx.coroutines.Dispatchers
+import app.dtma.one.core.model.VpnUiState
+import app.dtma.one.vpn.VpnStateHolder
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * Practical path when local DTMA cannot reach TG/YouTube:
- * free Cloudflare WARP via WireGuard (external egress), not another local remap.
+ * In-app free Cloudflare WARP (embedded WireGuard). No external WireGuard app required.
  */
 @Composable
 fun FullBypassScreen() {
@@ -41,11 +46,54 @@ fun FullBypassScreen() {
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var confFile by remember { mutableStateOf<File?>(null) }
+    val vpnStatus by VpnStateHolder.status.collectAsStateWithLifecycle()
+    val warpOn = WarpController.isRunning ||
+        (vpnStatus.state == VpnUiState.ACTIVE && vpnStatus.message.contains("WARP", ignoreCase = true))
 
-    val wgInstalled = remember { WarpInstaller.isInstalled(context, WarpInstaller.WIREGUARD_PKG) }
-    val warpAppInstalled = remember {
-        WarpInstaller.isInstalled(context, WarpInstaller.CLOUDFLARE_WARP_PKG)
+    var pendingStart by remember { mutableStateOf(false) }
+
+    fun doStartWarp() {
+        busy = true
+        status = context.getString(R.string.warp_enabling)
+        scope.launch {
+            val result = WarpController.start(context)
+            status = result.fold(
+                onSuccess = {
+                    "WARP внутри DTMA включён.\n" +
+                        "Проверьте YouTube и Telegram (лучше LTE).\n" +
+                        "Локальный hev-VPN при этом выключен."
+                },
+                onFailure = { e ->
+                    "Ошибка: ${e.message}\n" +
+                        "Попробуйте «Новый аккаунт WARP» или приложение 1.1.1.1."
+                },
+            )
+            busy = false
+        }
+    }
+
+    val vpnPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && pendingStart) {
+            pendingStart = false
+            doStartWarp()
+        } else {
+            pendingStart = false
+            busy = false
+            status = "Нужно разрешение VPN для WARP"
+        }
+    }
+
+    fun requestAndStart() {
+        val prepare = VpnService.prepare(context)
+        if (prepare != null) {
+            pendingStart = true
+            busy = true
+            vpnPermission.launch(prepare)
+        } else {
+            doStartWarp()
+        }
     }
 
     Column(
@@ -58,117 +106,85 @@ fun FullBypassScreen() {
         Text("Чтобы всё работало", style = MaterialTheme.typography.headlineSmall)
         Card(
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
             ),
         ) {
             Text(
                 modifier = Modifier.padding(12.dp),
-                text = "У вас: Wi‑Fi TG 0/26, LTE 2/26, YouTube DoH ✓ но видео нет, " +
-                    "без VPN оба мертвы.\n\n" +
-                    "Локальный DTMA это НЕ починит. Нужен выход через ЧУЖУЮ сеть " +
-                    "(Cloudflare WARP бесплатно). Ниже — автогенерация WireGuard-конфига WARP.",
+                text = "Cloudflare WARP встроен в DTMA — отдельный WireGuard не нужен.\n" +
+                    "Трафик идёт через сеть Cloudflare (не сервер DTMA). " +
+                    "Локальный режим hev при старте WARP отключается.",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
 
-        Text("Способ 1 — WARP через WireGuard (рекомендуется)", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "1) Установите WireGuard\n" +
-                "2) Сгенерируйте conf (аккаунт Cloudflare free)\n" +
-                "3) Импорт → включите туннель\n" +
-                "4) DTMA VPN выключите (двойной туннель ломает сеть)\n" +
-                "5) Проверьте YouTube + Telegram",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        if (!wgInstalled) {
+        if (warpOn) {
             Button(
-                onClick = { WarpInstaller.openPlayStore(context, WarpInstaller.WIREGUARD_PKG) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Установить WireGuard")
-            }
-        } else {
-            Text("WireGuard установлен ✓", color = MaterialTheme.colorScheme.primary)
-        }
-
-        Button(
-            onClick = {
-                busy = true
-                status = "Регистрация free WARP…"
-                scope.launch {
-                    try {
-                        val result = withContext(Dispatchers.IO) {
-                            WarpConfigGenerator.generate()
-                        }
-                        val f = withContext(Dispatchers.IO) {
-                            WarpInstaller.writeConf(context, result.confText)
-                        }
-                        confFile = f
-                        status = "Готово: ${result.addressV4} → ${result.endpoint}\n" +
-                            WarpInstaller.openInWireGuard(context, f)
-                    } catch (e: Exception) {
-                        status = "Ошибка WARP: ${e.message}\n" +
-                            "Попробуйте способ 2 (приложение 1.1.1.1 WARP) или другую сеть."
-                    } finally {
+                onClick = {
+                    busy = true
+                    scope.launch {
+                        WarpController.stop(context)
+                        status = "WARP выключен"
                         busy = false
                     }
-                }
-            },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(if (busy) "Генерация…" else "Сгенерировать WARP и открыть")
-        }
-
-        confFile?.let { f ->
-            OutlinedButton(
-                onClick = {
-                    status = WarpInstaller.openInWireGuard(context, f)
                 },
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Снова открыть conf в WireGuard")
+                Text(stringResource(R.string.warp_disable))
+            }
+        } else {
+            Button(
+                onClick = { requestAndStart() },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (busy) stringResource(R.string.warp_enabling)
+                    else stringResource(R.string.warp_enable),
+                )
             }
         }
 
-        Text("Способ 2 — приложение Cloudflare 1.1.1.1", style = MaterialTheme.typography.titleMedium)
-        Button(
+        OutlinedButton(
             onClick = {
-                if (warpAppInstalled) {
-                    WarpInstaller.openCloudflareWarpApp(context)
-                    status = "Включите WARP (не только DNS) в приложении 1.1.1.1"
-                } else {
-                    WarpInstaller.openPlayStore(context, WarpInstaller.CLOUDFLARE_WARP_PKG)
-                    status = "Установите 1.1.1.1 → WARP ON → DTMA OFF"
-                }
+                WarpController.clearCachedConfig()
+                status = "Кэш WARP сброшен. Нажмите «Включить WARP» для новой регистрации."
             },
             modifier = Modifier.fillMaxWidth(),
+            enabled = !busy && !warpOn,
         ) {
-            Text(if (warpAppInstalled) "Открыть 1.1.1.1 WARP" else "Установить 1.1.1.1 WARP")
+            Text("Новый аккаунт WARP (сброс conf)")
         }
 
-        Text("Способ 3 — только Telegram (MTProto)", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Если WARP недоступен: в Telegram → Настройки → Данные → Прокси → MTProto. " +
-                "Нужен рабочий secret (свой VPS или проверенный источник).",
+            "После включения: откройте YouTube и Telegram. " +
+                "Если WARP API недоступен в вашей сети — способ ниже.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Text("Запасной путь", style = MaterialTheme.typography.titleMedium)
+        OutlinedButton(
+            onClick = {
+                WarpInstaller.openCloudflareWarpApp(context)
+                status = "Включите WARP в 1.1.1.1. DTMA VPN/WARP выключите, чтобы не конфликтовать."
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Приложение Cloudflare 1.1.1.1 (если in-app не взлетел)")
+        }
         OutlinedButton(
             onClick = {
                 try {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("tg://settings")),
-                    )
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("tg://settings")))
                 } catch (_: Exception) {
-                    status = "Откройте Telegram → Настройки → Данные и память → Прокси"
+                    status = "Telegram → Настройки → Данные → Прокси → MTProto"
                 }
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Открыть настройки Telegram")
+            Text("MTProto в Telegram")
         }
 
         if (status.isNotBlank()) {
@@ -182,9 +198,7 @@ fun FullBypassScreen() {
         }
 
         Text(
-            "Важно: free WARP — сеть Cloudflare, не сервер DTMA. " +
-                "Условия Cloudflare / лимиты / блокировки WARP в вашей стране возможны. " +
-                "При отказе API — используйте приложение 1.1.1.1.",
+            "Статус: ${vpnStatus.state} — ${vpnStatus.message.ifBlank { "—" }}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

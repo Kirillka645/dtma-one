@@ -18,6 +18,11 @@
     <string name="nav_settings">Настройки</string>
     <string name="nav_about">О приложении</string>
     <string name="nav_bypass">Чтобы работало</string>
+    <string name="warp_notification_title">DTMA WARP активен</string>
+    <string name="warp_notification_text">Cloudflare WARP внутри DTMA (без приложения WireGuard)</string>
+    <string name="warp_enable">Включить WARP в DTMA</string>
+    <string name="warp_disable">Выключить WARP</string>
+    <string name="warp_enabling">Запуск WARP…</string>
     <string name="disclaimer_short">Не гарантирует обход блокировок. Помогает только при наличии достижимого легитимного endpoint.</string>
     <string name="system_mode_label">Общесистемный транспорт (VpnService)</string>
     <string name="builtin_tls_label">Встроенный HTTPS-тест (полная TLS-валидация DTMA One)</string>

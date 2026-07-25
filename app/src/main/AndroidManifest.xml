@@ -42,6 +42,20 @@
                 android:value="local_vpn_dataplane" />
         </service>
 
+        <!-- In-app Cloudflare WARP (embedded WireGuard Go backend). -->
+        <service
+            android:name=".bypass.WarpVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="cloudflare_warp_tunnel" />
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
